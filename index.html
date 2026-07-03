@@ -177,6 +177,8 @@ function loadDefault(){
 
 function parseWorkbook(wb){
   const ws = wb.Sheets['Daily'] || wb.Sheets[wb.SheetNames[0]];
+  const date1904 = !!(wb.Workbook && wb.Workbook.WBProps && wb.Workbook.WBProps.date1904);
+  const epoch = date1904 ? Date.UTC(1904,0,1) : Date.UTC(1899,11,30);
   const raw = XLSX.utils.sheet_to_json(ws, {header:1, defval:null});
   let hi = -1;
   for(let i = 0; i < Math.min(raw.length, 10); i++){
@@ -204,7 +206,7 @@ function parseWorkbook(wb){
     if(d == null) continue;
     let ymd = null;
     if(typeof d === 'number'){
-      const dt = new Date(Date.UTC(1899,11,30) + Math.round(d)*86400000);
+      const dt = new Date(epoch + Math.round(d)*86400000);
       ymd = dt.toISOString().slice(0,10);
     } else if(d instanceof Date){
       ymd = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
