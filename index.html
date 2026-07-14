@@ -360,6 +360,15 @@ function renderCharts(from, to, h, lg, ag){
   const navs = [];
   const dd = rets.map(r => { nav*=(1+r); navs.push(nav); peak=Math.max(peak,nav); return (nav/peak-1)*100; });
 
+  // Adaptive tick precision: low-vol track records (< ~1%) need decimals or every tick reads "0 %"
+  const dec = mag => mag >= 5 ? 0 : mag >= 1 ? 1 : mag >= 0.1 ? 2 : 3;
+  const maxVol = Math.max(0, ...vol.filter(v => v != null));
+  const ddMag  = Math.max(0, ...dd.map(v => -v));
+  const navSpan = navs.length ? Math.max(...navs) - Math.min(...navs) : 0;
+  const volDec = dec(maxVol);
+  const ddDec  = Math.max(1, dec(ddMag));
+  const navDec = navSpan >= 20 ? 0 : navSpan >= 4 ? 1 : navSpan >= 0.4 ? 2 : 3;
+
   const xTicks = window.innerWidth < 640 ? 5 : 9;
   const xOpts = { ticks:{color:DIM, maxTicksLimit:xTicks, maxRotation:0, autoSkipPadding:12, callback:function(v){return this.getLabelForValue(v).slice(0,7);}}, grid:{display:false} };
 
@@ -369,7 +378,7 @@ function renderCharts(from, to, h, lg, ag){
     data:{labels, datasets:[{data:navs, borderColor:'#4fc38a', backgroundColor:'rgba(79,195,138,0.10)', fill:true, borderWidth:1.8, pointRadius:0, pointHitRadius:6, tension:0.1}]},
     options:{responsive:true, maintainAspectRatio:false, animation:false,
       plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>c.parsed.y.toFixed(2).replace('.',',')}}},
-      scales:{x:xOpts, y:{ticks:{color:DIM, callback:v=>v.toFixed(0)}, grid:{color:GRID}}}}
+      scales:{x:xOpts, y:{ticks:{color:DIM, callback:v=>v.toFixed(navDec)}, grid:{color:GRID}}}}
   });
 
   if(volChart) volChart.destroy();
@@ -378,7 +387,7 @@ function renderCharts(from, to, h, lg, ag){
     data:{labels, datasets:[{data:vol, borderColor:'#f2a33c', borderWidth:1.8, pointRadius:0, pointHitRadius:6, tension:0.15, spanGaps:false}]},
     options:{responsive:true, maintainAspectRatio:false, animation:false,
       plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>c.parsed.y.toFixed(2).replace('.',',')+' %'}}},
-      scales:{x:xOpts, y:{ticks:{color:DIM, callback:v=>v.toFixed(0)+' %'}, grid:{color:GRID}, beginAtZero:true}}}
+      scales:{x:xOpts, y:{ticks:{color:DIM, callback:v=>v.toFixed(volDec)+' %'}, grid:{color:GRID}, beginAtZero:true}}}
   });
 
   if(ddChart) ddChart.destroy();
@@ -387,7 +396,7 @@ function renderCharts(from, to, h, lg, ag){
     data:{labels, datasets:[{data:dd, borderColor:'#e06666', backgroundColor:'rgba(224,102,102,0.16)', fill:true, borderWidth:1.5, pointRadius:0, pointHitRadius:6, tension:0.1}]},
     options:{responsive:true, maintainAspectRatio:false, animation:false,
       plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>c.parsed.y.toFixed(2).replace('.',',')+' %'}}},
-      scales:{x:xOpts, y:{ticks:{color:DIM, callback:v=>v.toFixed(1)+' %'}, grid:{color:GRID}, max:0}}}
+      scales:{x:xOpts, y:{ticks:{color:DIM, callback:v=>v.toFixed(ddDec)+' %'}, grid:{color:GRID}, max:0}}}
   });
 }
 
