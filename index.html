@@ -506,10 +506,16 @@ function renderCharts(from, to, h, lg, ag){
   const rets = rows.map(r => r.pnl/r.ear*k);
   const labels = rows.map(r => r.ymd);
 
+  // L'export n'est pas quotidien partout (2016-02→2017-12 : une seule ligne par fin de mois,
+  // 2018-2022 lacunaire). Un rendement peut donc couvrir un mois. On le ramène à un équivalent
+  // 1 jour (÷√t) avant la vol, sans quoi le ×√252 annualise un mouvement mensuel comme une
+  // séance et invente des pics. NAV et drawdown composent les rendements réels, eux inchangés.
+  const dret = rets.map((v, i) => v / Math.sqrt(i ? bdays(rows[i-1].ymd, rows[i].ymd) : 1));
+
   const w = Number(document.getElementById('volwin').value);
-  const vol = rets.map((_, i) => {
+  const vol = dret.map((_, i) => {
     if(i < w-1) return null;
-    const s = rets.slice(i-w+1, i+1);
+    const s = dret.slice(i-w+1, i+1);
     const mean = s.reduce((a,b)=>a+b,0)/w;
     return Math.sqrt(s.reduce((a,b)=>a+(b-mean)**2,0)/(w-1))*Math.sqrt(252)*100;
   });
