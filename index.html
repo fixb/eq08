@@ -36,6 +36,8 @@ h1 span{color:var(--amber)}
 .sleevesel{display:flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--dim)}
 .sleevesel select{background:var(--panel2);border:1px solid var(--line);border-radius:4px;color:var(--amber);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:3px 6px;max-width:220px}
 #fileerr{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--neg);margin-top:7px;line-height:1.5}
+#cleanlog{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--dim);margin-top:7px;line-height:1.5}
+#cleanlog b{color:var(--amber);font-weight:500}
 .grid{display:grid;grid-template-columns:280px 1fr;gap:18px;align-items:start}
 @media(max-width:820px){.grid{grid-template-columns:1fr}}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}
@@ -96,6 +98,7 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
     <div class="chips" id="chips"></div>
     <label class="sleevesel hidden" id="sleevewrap">Vue <select id="sleeve"></select></label>
   </div>
+  <div id="cleanlog"></div>
   <div id="fileerr"></div>
 </div>
 
@@ -110,6 +113,11 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
     <div class="param"><label>Long / AUM equivalent</label><input type="number" id="p_a" value="85.0" step="0.5" min="0.1">%</div>
     <div class="hint">AUM eq = Long / taux de déploiement (85% de l'AUM déployé en long)</div>
     <div class="param"><label>Risk-free (annuel, EUR)</label><input type="number" id="p_rf" value="2.50" step="0.05">%</div>
+    <h2 style="margin-top:16px">Nettoyage</h2>
+    <div class="param"><label>Seuil artefact |ΔPnL|/EAR</label><input type="number" id="p_k" value="0.25" step="0.05" min="0">×</div>
+    <div class="hint">Un jour au-delà du seuil est traité comme sans information (PnL = 0). 0 = filtre désactivé.</div>
+    <div class="param"><label>Plancher EAR</label><input type="number" id="p_fl" value="1.0" step="0.5" min="0">%</div>
+    <div class="hint">% de l'EAR médian du sleeve — sous ce seuil le book est dormant, le jour est écarté</div>
     <h2 style="margin-top:16px">Fenêtre</h2>
     <div class="param"><label>From</label><select id="w_from"></select></div>
     <div class="param"><label>To</label><select id="w_to"></select></div>
@@ -182,14 +190,12 @@ function buildMonths(daily){
 }
 
 function loadDefault(){
-  let prev = null;
-  const daily = DEFAULT_DATA.map(([ymd, cum, ear]) => {
-    const m = ymd.slice(0,4) + '-' + ymd.slice(4,6);
-    const pnl = prev == null ? cum : cum - prev;
-    prev = cum;
-    return {m, ymd: ymd.slice(0,4)+'-'+ymd.slice(4,6)+'-'+ymd.slice(6,8), ear, pnl};
-  });
-  datasets = [{name: DEFAULT_LABEL, label: 'default', daily, isDefault: true}];
+  const raw = DEFAULT_DATA.map(([ymd, cum, ear]) => ({
+    m: ymd.slice(0,4) + '-' + ymd.slice(4,6),
+    ymd: ymd.slice(0,4)+'-'+ymd.slice(4,6)+'-'+ymd.slice(6,8),
+    ear, cum, dp: null
+  }));
+  datasets = [{name: DEFAULT_LABEL, label: 'default', raw, isDefault: true}];
   activeIdx = -1;
 }
 
@@ -217,7 +223,10 @@ function parseWorkbook(wb){
   if(hi < 0) throw new Error('Ligne d\u2019en-t\u00eate introuvable (Date/Jour + EAR)');
   const hdr = raw[hi].map(c => String(c||''));
   const dateIdx = hdr.findIndex(c=>/date|jour/i.test(c));
-  const earIdx  = hdr.findIndex(c=>/ear/i.test(c) && !/year/i.test(c));
+  // La colonne sleeve porte son propre nom, qui peut contenir "EAR" (CB8.USA.EARN) : sans
+  // priorité à l'en-tête exact, /ear/ matche le sleeve et EAR/PnL partent inversés en silence.
+  let earIdx = hdr.findIndex(c=>/^\s*ear\s*$/i.test(c));
+  if(earIdx < 0) earIdx = hdr.findIndex(c=>/\bear\b/i.test(c) && !/year/i.test(c));
   const dailyIdx = hdr.findIndex(c=>/daily.*pnl/i.test(c));
   let cumIdx = hdr.findIndex(c=>/cumul/i.test(c));
   let label = 'fichier';
@@ -227,8 +236,7 @@ function parseWorkbook(wb){
   } else label = 'Daily';
   if(dailyIdx < 0 && cumIdx < 0) throw new Error('Colonne PnL introuvable');
 
-  const daily = [];
-  let prevCum = null;
+  const rows = [];
   for(let i = hi+1; i < raw.length; i++){
     const r = raw[i]; if(!r) continue;
     const d = r[dateIdx];
@@ -251,15 +259,52 @@ function parseWorkbook(wb){
     const m = ymd ? ymd.slice(0,7) : null;
     if(!m || !/^(19|20)\d{2}-(0[1-9]|1[0-2])$/.test(m)) continue;
     const ear = Number(r[earIdx]) || 0;
-    const cum = cumIdx >= 0 && r[cumIdx] != null ? Number(r[cumIdx]) : null;
-    let pnl = dailyIdx >= 0 && r[dailyIdx] != null ? Number(r[dailyIdx]) : null;
-    if(pnl == null || isNaN(pnl)){
-      pnl = (cum != null && prevCum != null) ? cum - prevCum : (cum != null ? cum : 0);
-    }
-    if(cum != null) prevCum = cum;
-    daily.push({m, ymd, ear, pnl});
+    let cum = cumIdx >= 0 && r[cumIdx] != null ? Number(r[cumIdx]) : null;
+    let dp = dailyIdx >= 0 && r[dailyIdx] != null ? Number(r[dailyIdx]) : null;
+    if(cum != null && isNaN(cum)) cum = null;
+    if(dp != null && isNaN(dp)) dp = null;
+    rows.push({m, ymd, ear, cum, dp});   // cumul brut conservé : le nettoyage est rejoué à chaud
   }
-  return {label, daily};
+  return {label, raw: rows};
+}
+
+// Jours ouvrés séparant deux lignes, week-ends exclus. Un pont Vendredi→Lundi vaut 1.
+function bdays(from, to){
+  const cal = Math.round((Date.parse(to) - Date.parse(from)) / 86400000);
+  return cal <= 4 ? 1 : Math.max(1, Math.round(cal * 5/7));
+}
+
+// Les exports BgAM portent des artefacts de reporting que le diff du cumul transforme en
+// faux PnL : un 0 exact encode une valeur manquante (26-27/11/2014, le même jour sur 4
+// sleeves), et le cumul décroche ponctuellement de plusieurs dizaines de M€ à EAR inchangé.
+// Un tel jour n'est pas un mouvement de marché : |ΔPnL| > k × EAR est hors de portée d'un
+// book dont l'EAR mesure le risque quotidien.
+function cleanDataset(raw, k, floorPct){
+  const ears = raw.map(r => r.ear).filter(v => v > 0).sort((a,b) => a-b);
+  const floor = ears.length ? ears[ears.length >> 1] * floorPct : 0;
+  const daily = [];
+  let prevCum = null, prevYmd = null, gaps = 0, jumps = 0, impact = 0;
+  for(const r of raw){
+    // 0 exact dans le cumul = manquant : on enjambe le trou sans casser la chaîne, si bien
+    // que le jour suivant porte le vrai mouvement accumulé plutôt qu'un aller-retour fictif.
+    // Seul un 0 sur book actif est un trou ; à EAR nul c'est une ligne pré-inception.
+    if(r.cum === 0){ if(r.ear > floor) gaps++; continue; }
+    let pnl = r.dp, span = 1;
+    if(r.cum != null){
+      // Premier point exploitable : le cumul est depuis l'origine, son niveau n'est pas un PnL du jour.
+      if(pnl == null) pnl = prevCum == null ? 0 : r.cum - prevCum;
+      if(prevYmd) span = bdays(prevYmd, r.ymd);
+      prevCum = r.cum; prevYmd = r.ymd;
+    }
+    if(pnl == null) pnl = 0;
+    if(r.ear <= floor) continue;   // book dormant : le rendement pnl/EAR n'est pas défini
+    // L'EAR mesure un risque à 1 jour, mais l'export saute des jours (2016-2017 : une seule
+    // ligne par mois). Le ΔPnL couvre alors tout l'intervalle : sans mise à l'échelle en √t,
+    // un mouvement mensuel parfaitement normal serait pris pour un artefact.
+    if(k > 0 && Math.abs(pnl) > k * r.ear * Math.sqrt(span)){ jumps++; impact -= pnl; pnl = 0; }
+    daily.push({m: r.m, ymd: r.ymd, ear: r.ear, pnl});
+  }
+  return {daily, gaps, jumps, impact};
 }
 
 function stats(rets, rf){
@@ -356,29 +401,53 @@ function initSelectors(keepWindow){
 
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+// L'export BgAM nomme la colonne PnL d'après le sleeve : c'est un identifiant bien plus
+// lisible que « BgAM PnL History - CB3. VOL.xlsx ». Le nom de fichier reste dans le title.
+function dispName(ds){
+  return /^(daily|fichier|default)$/i.test(ds.label) ? ds.name.replace(/\.xlsx?$/i,'') : ds.label;
+}
+
 function renderFiles(){
   document.getElementById('chips').innerHTML = datasets.map((ds,i) => {
     const ms = [...new Set(ds.daily.map(r=>r.m))].sort();
-    const range = ms.length ? ms[0] + ' → ' + ms[ms.length-1] : '';
-    const rm = ds.isDefault ? '' : `<button data-rm="${i}" title="Retirer ce fichier" aria-label="Retirer ${esc(ds.name)}">×</button>`;
-    return `<span class="chip" title="${esc(ds.label)} — ${range}">${esc(ds.name)}<span class="n">${ms.length} m</span>${rm}</span>`;
+    const range = ms.length ? ms[0] + ' → ' + ms[ms.length-1] : 'aucun jour retenu';
+    const rm = ds.isDefault ? '' : `<button data-rm="${i}" title="Retirer" aria-label="Retirer ${esc(dispName(ds))}">×</button>`;
+    return `<span class="chip" title="${esc(ds.name)} — ${range}">${esc(dispName(ds))}<span class="n">${ms.length} m</span>${rm}</span>`;
   }).join('');
 
   const wrap = document.getElementById('sleevewrap'), sel = document.getElementById('sleeve');
   const multi = datasets.length > 1;
   wrap.classList.toggle('hidden', !multi);
   if(multi){
-    sel.innerHTML = `<option value="-1">Agrégat (${datasets.length} fichiers)</option>` +
-      datasets.map((ds,i) => `<option value="${i}">${esc(ds.name)}</option>`).join('');
+    sel.innerHTML = `<option value="-1">Agrégat (${datasets.length} sleeves)</option>` +
+      datasets.map((ds,i) => `<option value="${i}">${esc(dispName(ds))}</option>`).join('');
     sel.value = String(activeIdx);
   }
 }
 
+function renderCleanLog(sets){
+  const el = document.getElementById('cleanlog');
+  const jumps = sets.reduce((a,d)=>a+d.jumps, 0);
+  const gaps  = sets.reduce((a,d)=>a+d.gaps, 0);
+  const impact = sets.reduce((a,d)=>a+d.impact, 0);
+  if(!jumps && !gaps){ el.textContent = ''; return; }
+  const bits = [];
+  if(jumps) bits.push(`<b>${jumps}</b> jour${jumps>1?'s':''} neutralisé${jumps>1?'s':''} (PnL forcé à 0)`);
+  if(gaps)  bits.push(`<b>${gaps}</b> trou${gaps>1?'s':''} de cumul enjambé${gaps>1?'s':''}`);
+  const sign = impact >= 0 ? '+' : '−';
+  bits.push(`impact PnL total <b>${sign}${fmt.eurM(Math.abs(impact))}</b> vs cumul brut`);
+  el.innerHTML = 'Nettoyage : ' + bits.join(' · ');
+}
+
 function refresh(keepWindow){
+  const k = Math.max(0, Number(document.getElementById('p_k').value) || 0);
+  const floorPct = Math.max(0, Number(document.getElementById('p_fl').value) || 0)/100;
+  for(const ds of datasets) Object.assign(ds, cleanDataset(ds.raw, k, floorPct));
   const sets = activeIdx >= 0 && datasets[activeIdx] ? [datasets[activeIdx]] : datasets;
   dailyRows = aggregate(sets);
   buildMonths(dailyRows);
   renderFiles();
+  renderCleanLog(sets);
   initSelectors(keepWindow);
   render();
 }
@@ -389,9 +458,9 @@ function readFile(file){
     rd.onload = e => {
       try{
         const wb = XLSX.read(new Uint8Array(e.target.result), {type:'array'});
-        const {label, daily} = parseWorkbook(wb);
-        if(!daily.length) throw new Error('aucune donnée exploitable');
-        res({name: file.name, label, daily});
+        const {label, raw} = parseWorkbook(wb);
+        if(!raw.length) throw new Error('aucune donnée exploitable');
+        res({name: file.name, label, raw});
       }catch(err){ rej(new Error(file.name + ' : ' + err.message)); }
     };
     rd.onerror = () => rej(new Error(file.name + ' : lecture impossible'));
@@ -502,6 +571,9 @@ document.getElementById('chips').addEventListener('click', e => {
 document.getElementById('sleeve').addEventListener('change', e => { activeIdx = Number(e.target.value); refresh(true); });
 ['p_h','p_l','p_a','p_rf','w_from','w_to','volwin'].forEach(id =>
   document.getElementById(id).addEventListener('input', ()=> months.length && render()));
+// Le nettoyage change la série elle-même : il faut rejouer clean + agrégat, pas seulement render.
+['p_k','p_fl'].forEach(id =>
+  document.getElementById(id).addEventListener('input', ()=> refresh(true)));
 document.getElementById('stamp').textContent = new Date().toISOString().slice(0,10) + ' · daily files → agrégat → monthly → summary';
 
 loadDefault();
