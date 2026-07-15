@@ -584,23 +584,52 @@ const XHEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 
 function xesc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
 
-function chartXml(title, col, nRows, color, idx){
+// Les couleurs de l'écran sont calibrées pour un fond sombre et passent mal sur le blanc
+// d'Excel : on reprend les mêmes teintes, assombries pour tenir le contraste.
+const XL_GRID = 'E8E8E8', XL_AXIS = 'D0D0D0', XL_TXT = '7A7A7A', XL_TITLE = '404040', XL_FONT = 'Calibri';
+
+// Échelle d'axe suivant l'ordre de grandeur, comme les graphes de la page : un book à
+// 1,8 Md€ de gross donne sinon des étiquettes à 10 chiffres.
+function axisFmt(maxAbs){
+  if(maxAbs >= 1e8) return '#,##0,, "M€"';      // 313 M€
+  if(maxAbs >= 1e7) return '#,##0.0,, "M€"';    // 11,7 M€ — « 11 718 k€ » serait long et illisible
+  if(maxAbs >= 1e5) return '#,##0, "k€"';       // 250 k€
+  return '#,##0 "€"';
+}
+
+function chartXml(title, col, nRows, color, idx, fmt){
   const idA = 100000001 + idx*2, idB = 100000002 + idx*2;
-  return XHEAD + `<c:chartSpace xmlns:c="${NS_C}" xmlns:a="${NS_A}" xmlns:r="${NS_R}"><c:chart>`
-    + `<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>${xesc(title)}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title>`
+  const txPr = (sz, c, rot) => `<c:txPr><a:bodyPr${rot ? ` rot="${rot}" vert="horz"` : ''}/><a:lstStyle/>`
+    + `<a:p><a:pPr><a:defRPr sz="${sz}" b="0"><a:solidFill><a:srgbClr val="${c}"/></a:solidFill>`
+    + `<a:latin typeface="${XL_FONT}"/></a:defRPr></a:pPr><a:endParaRPr lang="fr-FR"/></a:p></c:txPr>`;
+  const line = (w, c) => `<c:spPr><a:ln w="${w}" cap="flat"><a:solidFill><a:srgbClr val="${c}"/></a:solidFill><a:round/></a:ln></c:spPr>`;
+  const noFill = '<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>';
+
+  return XHEAD + `<c:chartSpace xmlns:c="${NS_C}" xmlns:a="${NS_A}" xmlns:r="${NS_R}">`
+    + `<c:roundedCorners val="0"/><c:chart>`
+    + `<c:title><c:tx><c:rich><a:bodyPr rot="0" spcFirstLastPara="1" vert="horz" wrap="square" anchor="ctr" anchorCtr="1"/><a:lstStyle/>`
+    + `<a:p><a:pPr><a:defRPr sz="1150" b="1"><a:solidFill><a:srgbClr val="${XL_TITLE}"/></a:solidFill><a:latin typeface="${XL_FONT}"/></a:defRPr></a:pPr>`
+    + `<a:r><a:rPr lang="fr-FR" sz="1150" b="1"><a:solidFill><a:srgbClr val="${XL_TITLE}"/></a:solidFill><a:latin typeface="${XL_FONT}"/></a:rPr>`
+    + `<a:t>${xesc(title)}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/>${noFill}</c:title>`
     + `<c:autoTitleDeleted val="0"/><c:plotArea><c:layout/><c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>`
     + `<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Daily!$${col}$1</c:f></c:strRef></c:tx>`
-    + `<c:spPr><a:ln w="15875"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill></a:ln></c:spPr>`
+    + `<c:spPr><a:ln w="19050" cap="rnd"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill><a:round/></a:ln><a:effectLst/></c:spPr>`
     + `<c:marker><c:symbol val="none"/></c:marker>`
     + `<c:cat><c:strRef><c:f>Daily!$A$2:$A$${nRows}</c:f></c:strRef></c:cat>`
     + `<c:val><c:numRef><c:f>Daily!$${col}$2:$${col}$${nRows}</c:f></c:numRef></c:val>`
     + `<c:smooth val="0"/></c:ser><c:marker val="0"/><c:axId val="${idA}"/><c:axId val="${idB}"/></c:lineChart>`
     + `<c:catAx><c:axId val="${idA}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/>`
-    + `<c:tickLblPos val="low"/><c:crossAx val="${idB}"/></c:catAx>`
+    + `<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="low"/>`
+    + line(9525, XL_AXIS) + txPr(800, XL_TXT, -2700000) + `<c:crossAx val="${idB}"/></c:catAx>`
     + `<c:valAx><c:axId val="${idB}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/>`
-    + `<c:majorGridlines/><c:numFmt formatCode="#,##0" sourceLinked="0"/><c:tickLblPos val="nextTo"/><c:crossAx val="${idA}"/></c:valAx>`
-    + `</c:plotArea><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend>`
-    + `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>`;
+    + `<c:majorGridlines>${line(9525, XL_GRID)}</c:majorGridlines>`
+    + `<c:numFmt formatCode="${xesc(fmt)}" sourceLinked="0"/>`
+    + `<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>`
+    + noFill + txPr(850, XL_TXT) + `<c:crossAx val="${idA}"/></c:valAx>`
+    + noFill + `</c:plotArea>`
+    + `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart>`
+    + `<c:spPr><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln><a:noFill/></a:ln></c:spPr>`
+    + txPr(900, XL_TXT) + `</c:chartSpace>`;
 }
 
 function drawingXml(n){
@@ -720,12 +749,16 @@ async function exportXlsx(){
     const path = tgt.startsWith('/') ? tgt.slice(1) : 'xl/' + tgt.replace(/^\.\//,'');
     const base = path.split('/').pop();
 
+    // [titre, colonne Excel, index dans d (pour l'échelle d'axe), couleur]
     const charts = [
-      ['Cumul PnL (€)', 'C', '4FC38A'],
-      ['EAR (€)', 'D', 'F2A33C'],
-      ['Long exposure (€)', 'F', '6EA8FE'],
+      ['Cumul PnL (€)',     'C', 2, '2E9E6B'],
+      ['EAR (€)',           'D', 3, 'D98324'],
+      ['Long exposure (€)', 'F', 5, '3B6FD4'],
     ];
-    charts.forEach(([t,c,col], i) => zip.file(`xl/charts/chart${i+1}.xml`, chartXml(t, c, nRows, col, i)));
+    charts.forEach(([title, colL, di, color], i) => {
+      const maxAbs = d.reduce((a,r) => Math.max(a, Math.abs(r[di])), 0);
+      zip.file(`xl/charts/chart${i+1}.xml`, chartXml(title, colL, nRows, color, i, axisFmt(maxAbs)));
+    });
     zip.file('xl/drawings/drawing1.xml', drawingXml(charts.length));
     zip.file('xl/drawings/_rels/drawing1.xml.rels', XHEAD
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
