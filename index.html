@@ -6,6 +6,7 @@
 <title>EQ08 — Summary on EAR</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <style>
 :root{
@@ -35,6 +36,10 @@ h1 span{color:var(--amber)}
 .chip button:hover{color:var(--neg)}
 .sleevesel{display:flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--dim)}
 .sleevesel select{background:var(--panel2);border:1px solid var(--line);border-radius:4px;color:var(--amber);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:3px 6px;max-width:220px}
+.filerow-r{display:flex;align-items:center;gap:12px}
+#xport{background:var(--panel2);border:1px solid var(--amber-dim);border-radius:4px;color:var(--amber);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:4px 10px;cursor:pointer;transition:background .15s}
+#xport:hover:not(:disabled){background:var(--amber-dim);color:var(--txt)}
+#xport:disabled{opacity:.5;cursor:default;border-color:var(--line);color:var(--dim)}
 #fileerr{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--neg);margin-top:7px;line-height:1.5}
 #cleanlog{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--dim);margin-top:7px;line-height:1.5}
 #cleanlog b{color:var(--amber);font-weight:500}
@@ -96,7 +101,10 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
 <div id="files">
   <div class="filerow">
     <div class="chips" id="chips"></div>
-    <label class="sleevesel hidden" id="sleevewrap">Vue <select id="sleeve"></select></label>
+    <div class="filerow-r">
+      <label class="sleevesel hidden" id="sleevewrap">Vue <select id="sleeve"></select></label>
+      <button id="xport" type="button">Exporter .xlsx</button>
+    </div>
   </div>
   <div id="cleanlog"></div>
   <div id="fileerr"></div>
@@ -564,6 +572,195 @@ function renderCharts(from, to, h, lg, ag){
   });
 }
 
+// ---- Export .xlsx avec graphiques natifs -----------------------------------------------
+// SheetJS (édition communautaire) n'écrit pas de graphiques : on lui laisse les données, puis
+// on injecte les parties chart/drawing dans le zip. OOXML impose l'ordre des éléments — un
+// écart et Excel déclare le fichier illisible sans rien dire de plus.
+const NS_C = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+const NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+const NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const NS_XDR = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing';
+const XHEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+
+function xesc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
+
+function chartXml(title, col, nRows, color, idx){
+  const idA = 100000001 + idx*2, idB = 100000002 + idx*2;
+  return XHEAD + `<c:chartSpace xmlns:c="${NS_C}" xmlns:a="${NS_A}" xmlns:r="${NS_R}"><c:chart>`
+    + `<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>${xesc(title)}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title>`
+    + `<c:autoTitleDeleted val="0"/><c:plotArea><c:layout/><c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>`
+    + `<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Daily!$${col}$1</c:f></c:strRef></c:tx>`
+    + `<c:spPr><a:ln w="15875"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill></a:ln></c:spPr>`
+    + `<c:marker><c:symbol val="none"/></c:marker>`
+    + `<c:cat><c:strRef><c:f>Daily!$A$2:$A$${nRows}</c:f></c:strRef></c:cat>`
+    + `<c:val><c:numRef><c:f>Daily!$${col}$2:$${col}$${nRows}</c:f></c:numRef></c:val>`
+    + `<c:smooth val="0"/></c:ser><c:marker val="0"/><c:axId val="${idA}"/><c:axId val="${idB}"/></c:lineChart>`
+    + `<c:catAx><c:axId val="${idA}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/>`
+    + `<c:tickLblPos val="low"/><c:crossAx val="${idB}"/></c:catAx>`
+    + `<c:valAx><c:axId val="${idB}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/>`
+    + `<c:majorGridlines/><c:numFmt formatCode="#,##0" sourceLinked="0"/><c:tickLblPos val="nextTo"/><c:crossAx val="${idA}"/></c:valAx>`
+    + `</c:plotArea><c:legend><c:legendPos val="b"/><c:overlay val="0"/></c:legend>`
+    + `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart></c:chartSpace>`;
+}
+
+function drawingXml(n){
+  let out = XHEAD + `<xdr:wsDr xmlns:xdr="${NS_XDR}" xmlns:a="${NS_A}">`;
+  for(let i = 0; i < n; i++){
+    out += `<xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${i*21}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>`
+      + `<xdr:to><xdr:col>12</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${i*21+20}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>`
+      + `<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="${i+2}" name="Chart ${i+1}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>`
+      + `<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>`
+      + `<a:graphic><a:graphicData uri="${NS_C}"><c:chart xmlns:c="${NS_C}" xmlns:r="${NS_R}" r:id="rId${i+1}"/></a:graphicData></a:graphic>`
+      + `</xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>`;
+  }
+  return out + '</xdr:wsDr>';
+}
+
+// Mêmes filtres que les graphes à l'écran : ce qui est exporté est ce qui est affiché.
+function exportRows(){
+  const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
+  const h  = Number(document.getElementById('p_h').value)/100;
+  const lg = Number(document.getElementById('p_l').value)/100;
+  const ag = Number(document.getElementById('p_a').value)/100;
+  let cum = 0;
+  return dailyRows
+    .filter(r => { const m = r.ymd.slice(0,7); return m >= from && m <= to && r.ear > 0; })
+    .map(r => {
+      cum += r.pnl;
+      const gross = r.ear/h, long = gross*(1+lg)/2;
+      return [r.ymd, r.pnl, cum, r.ear, gross, long, long/ag];
+    });
+}
+
+function exportMonths(){
+  const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
+  const h  = Number(document.getElementById('p_h').value)/100;
+  const lg = Number(document.getElementById('p_l').value)/100;
+  const ag = Number(document.getElementById('p_a').value)/100;
+  let nav = 100;
+  return months.filter(o => o.m >= from && o.m <= to && o.avgEar > 0).map(o => {
+    const rE = o.pnl/o.avgEar, rG = rE*h, rL = rE*h*2/(1+lg), rA = rL*ag;
+    nav *= (1+rA);
+    return [o.m, o.days, o.pnl, o.avgEar, rG, rL, rA, nav];
+  });
+}
+
+// Formats appliqués cellule par cellule : SheetJS n'a pas de format par colonne.
+function fmtCols(ws, map){
+  const rg = XLSX.utils.decode_range(ws['!ref']);
+  for(let R = rg.s.r + 1; R <= rg.e.r; R++)
+    for(const col in map){
+      const c = ws[col + (R+1)];
+      if(c && c.t === 'n') c.z = map[col];
+    }
+}
+
+async function exportXlsx(){
+  const btn = document.getElementById('xport');
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Export…';
+  try{
+    const d = exportRows();
+    if(!d.length) throw new Error('aucune donnée dans la fenêtre courante');
+    const nRows = d.length + 1;
+    const view = activeIdx >= 0 ? dispName(datasets[activeIdx]) : `Agrégat (${datasets.length} sleeves)`;
+    const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
+    const sets = activeIdx >= 0 ? [datasets[activeIdx]] : datasets;
+
+    const wb = XLSX.utils.book_new();
+    const wsD = XLSX.utils.aoa_to_sheet([
+      ['Date','PnL (€)','Cumul PnL (€)','EAR (€)','Gross (€)','Long exposure (€)','AUM eq (€)'], ...d]);
+    fmtCols(wsD, {B:'#,##0', C:'#,##0', D:'#,##0', E:'#,##0', F:'#,##0', G:'#,##0'});
+    wsD['!cols'] = [{wch:11},{wch:14},{wch:15},{wch:14},{wch:15},{wch:18},{wch:15}];
+    XLSX.utils.book_append_sheet(wb, wsD, 'Daily');
+
+    const wsM = XLSX.utils.aoa_to_sheet([
+      ['Month','Days','PnL (€)','Avg EAR (€)','r Gross','r Long','r AUM eq','NAV AUM eq'], ...exportMonths()]);
+    fmtCols(wsM, {C:'#,##0', D:'#,##0', E:'0.00%', F:'0.00%', G:'0.00%', H:'0.00'});
+    wsM['!cols'] = [{wch:9},{wch:6},{wch:14},{wch:14},{wch:10},{wch:10},{wch:10},{wch:11}];
+    XLSX.utils.book_append_sheet(wb, wsM, 'Monthly');
+
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([[]]), 'Charts');
+
+    // Le nettoyage s'applique au sleeve entier avant tout découpage : ces compteurs couvrent
+    // donc tout l'historique, pas la fenêtre exportée. Le libeller, sinon on les lit de travers.
+    const wsP = XLSX.utils.aoa_to_sheet([
+      ['Paramètre','Valeur'],
+      ['Vue', view],
+      ['Fenêtre exportée', from + ' → ' + to],
+      ['PB haircut / EaR-to-Gross', document.getElementById('p_h').value + ' %'],
+      ['Net / Gross', document.getElementById('p_l').value + ' %'],
+      ['Long / AUM equivalent', document.getElementById('p_a').value + ' %'],
+      ['Risk-free (annuel, EUR)', document.getElementById('p_rf').value + ' %'],
+      ['Seuil artefact |ΔPnL|/EAR', document.getElementById('p_k').value + ' ×'],
+      ['Plancher EAR (% médiane sleeve)', document.getElementById('p_fl').value + ' %'],
+      [],
+      ['Nettoyage — sur l’historique complet des sleeves, hors fenêtre', ''],
+      ['Jours neutralisés (PnL forcé à 0)', sets.reduce((a,x)=>a+x.jumps,0)],
+      ['Trous de cumul enjambés', sets.reduce((a,x)=>a+x.gaps,0)],
+      ['Impact PnL total vs cumul brut (€)', sets.reduce((a,x)=>a+x.impact,0)],
+      [],
+      ['Sleeves inclus', 'Fichier source'],
+      ...sets.map(x => [dispName(x), x.name]),
+    ]);
+    fmtCols(wsP, {B:'#,##0'});
+    wsP['!cols'] = [{wch:52},{wch:40}];
+    XLSX.utils.book_append_sheet(wb, wsP, 'Params');
+
+    const zip = await JSZip.loadAsync(XLSX.write(wb, {type:'array', bookType:'xlsx'}));
+
+    // Retrouver le fichier de la feuille Charts via workbook.xml + rels plutôt que de parier
+    // sur « sheet3.xml » : l'ordre des parties dépend de l'implémentation de l'écrivain.
+    const dp = new DOMParser();
+    const wbDoc = dp.parseFromString(await zip.file('xl/workbook.xml').async('string'), 'application/xml');
+    const rid = [...wbDoc.getElementsByTagName('sheet')].find(s => s.getAttribute('name') === 'Charts').getAttribute('r:id');
+    const relDoc = dp.parseFromString(await zip.file('xl/_rels/workbook.xml.rels').async('string'), 'application/xml');
+    const tgt = [...relDoc.getElementsByTagName('Relationship')].find(r => r.getAttribute('Id') === rid).getAttribute('Target');
+    const path = tgt.startsWith('/') ? tgt.slice(1) : 'xl/' + tgt.replace(/^\.\//,'');
+    const base = path.split('/').pop();
+
+    const charts = [
+      ['Cumul PnL (€)', 'C', '4FC38A'],
+      ['EAR (€)', 'D', 'F2A33C'],
+      ['Long exposure (€)', 'F', '6EA8FE'],
+    ];
+    charts.forEach(([t,c,col], i) => zip.file(`xl/charts/chart${i+1}.xml`, chartXml(t, c, nRows, col, i)));
+    zip.file('xl/drawings/drawing1.xml', drawingXml(charts.length));
+    zip.file('xl/drawings/_rels/drawing1.xml.rels', XHEAD
+      + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + charts.map((_,i) => `<Relationship Id="rId${i+1}" Type="${NS_R}/chart" Target="../charts/chart${i+1}.xml"/>`).join('')
+      + '</Relationships>');
+    zip.file(`xl/worksheets/_rels/${base}.rels`, XHEAD
+      + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rId1" Type="${NS_R}/drawing" Target="../drawings/drawing1.xml"/></Relationships>`);
+
+    let sx = await zip.file(path).async('string');
+    if(!/xmlns:r=/.test(sx)) sx = sx.replace(/<worksheet\s/, `<worksheet xmlns:r="${NS_R}" `);
+    // <drawing> se place en fin de séquence, après pageMargins/pageSetup s'ils existent.
+    zip.file(path, sx.replace('</worksheet>', '<drawing r:id="rId1"/></worksheet>'));
+
+    let ct = await zip.file('[Content_Types].xml').async('string');
+    ct = ct.replace('</Types>',
+      '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
+      + charts.map((_,i) => `<Override PartName="/xl/charts/chart${i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`).join('')
+      + '</Types>');
+    zip.file('[Content_Types].xml', ct);
+
+    const blob = await zip.generateAsync({type:'blob', compression:'DEFLATE'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `EQ08_${view.replace(/[^\w.-]+/g,'_')}_${from}_${to}.xlsx`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    document.getElementById('fileerr').textContent = '';
+  }catch(err){
+    document.getElementById('fileerr').textContent = 'Export : ' + err.message;
+  }finally{
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
 const drop = document.getElementById('drop'), fi = document.getElementById('fi');
 drop.addEventListener('click', ()=>fi.click());
 fi.addEventListener('change', e => { if(e.target.files.length) handleFiles(e.target.files); e.target.value = ''; });
@@ -575,6 +772,7 @@ document.getElementById('chips').addEventListener('click', e => {
   if(b) removeFile(Number(b.dataset.rm));
 });
 document.getElementById('sleeve').addEventListener('change', e => { activeIdx = Number(e.target.value); refresh(true); });
+document.getElementById('xport').addEventListener('click', exportXlsx);
 ['p_h','p_l','p_a','p_rf','w_from','w_to','volwin'].forEach(id =>
   document.getElementById(id).addEventListener('input', ()=> months.length && render()));
 // Le nettoyage change la série elle-même : il faut rejouer clean + agrégat, pas seulement render.
