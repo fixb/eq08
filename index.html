@@ -31,6 +31,7 @@ h1 span{color:var(--amber)}
 .filerow{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:3px 6px 3px 9px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--amber)}
+.chip.chip-pos{color:#6ea8ff;border-color:#2a3f6a}
 .chip .n{color:var(--faint)}
 .chip button{background:none;border:none;color:var(--faint);cursor:pointer;font-size:14px;line-height:1;padding:0 2px;font-family:inherit}
 .chip button:hover{color:var(--neg)}
@@ -92,10 +93,10 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
 </header>
 
 <div id="drop">
-  <b>Ajouter des données : déposer un ou plusieurs fichiers .xlsx</b> ou cliquer pour sélectionner
-  <span class="mono">formats acceptés : Daily (Date · Cumulative PnL · EAR · [Daily PnL]) ou export BgAM (N° · Jour · [sleeve] · EAR)</span>
-  <span class="mono">plusieurs fichiers = agrégat, PnL et EAR sommés par date</span>
-  <input type="file" id="fi" accept=".xlsx,.xls" multiple class="hidden">
+  <b>Ajouter des données : déposer un ou plusieurs fichiers .xlsx / .csv</b> ou cliquer pour sélectionner
+  <span class="mono">Daily (Date · Cumulative PnL · EAR · [Daily PnL]) · export BgAM (N° · Jour · [sleeve] · EAR) · Positions (Date · … · Pure Exposure)</span>
+  <span class="mono">plusieurs daily = agrégat sommé par date · un export Positions alimente le panneau Exposition</span>
+  <input type="file" id="fi" accept=".xlsx,.xls,.csv" multiple class="hidden">
 </div>
 
 <div id="files">
@@ -158,6 +159,33 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
   <div class="chartbox"><canvas id="ddChart" role="img" aria-label="Drawdown quotidien, base AUM équivalent"></canvas></div>
 </div>
 
+<div id="exposureWrap" class="hidden">
+  <div class="panel" style="margin-top:18px">
+    <div class="chart-head">
+      <h2 style="margin:0">Exposition — positions hebdomadaires</h2>
+      <select id="expunit" aria-label="Unité des expositions"><option value="eur">EUR</option><option value="nav">% du NAV</option></select>
+    </div>
+    <div class="kpis" id="expkpis" style="margin-top:12px;margin-bottom:0"></div>
+  </div>
+
+  <div class="panel" style="margin-top:18px">
+    <h2>Long / Short / Net exposure</h2>
+    <div class="chartbox"><canvas id="lsChart" role="img" aria-label="Exposition longue, short et nette par snapshot hebdomadaire"></canvas></div>
+  </div>
+
+  <div class="panel" style="margin-top:18px">
+    <h2>Gross exposure — réel (positions) vs impliqué par l'EAR (daily)</h2>
+    <div class="chartbox"><canvas id="grossChart" role="img" aria-label="Gross exposure réel des positions comparé au gross impliqué par l'EAR"></canvas></div>
+  </div>
+
+  <div class="panel" id="weeklyPanel">
+    <details>
+      <summary>Weekly detail</summary>
+      <div class="tscroll"><table id="weekly"><thead><tr><th>Date</th><th>Long</th><th>Short</th><th>Gross</th><th>Net</th><th>Net/Gross</th><th>NAV</th></tr></thead><tbody></tbody></table></div>
+    </details>
+  </div>
+</div>
+
 <div class="panel" id="monthlyPanel">
   <details>
     <summary>Monthly detail</summary>
@@ -167,7 +195,8 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
 </div>
 
 <footer>
-r_Gross = r_EAR × haircut · r_Long = r_Gross × 2/(1+Net/Gross) · r_AUM = r_Long × (Long/AUM) — vol échantillon (n−1), Sortino : downside dev vs Rf/12 (÷n), max DD sur chaîne NAV rebasée 100 au début de fenêtre. Charts : rendements quotidiens PnL_t/EAR_t (jours EAR>0), base AUM eq, vol glissante ×√252, drawdown sur cumul quotidien. Aucune donnée ne quitte le navigateur.
+r_Gross = r_EAR × haircut · r_Long = r_Gross × 2/(1+Net/Gross) · r_AUM = r_Long × (Long/AUM) — vol échantillon (n−1), Sortino : downside dev vs Rf/12 (÷n), max DD sur chaîne NAV rebasée 100 au début de fenêtre. Charts : rendements quotidiens PnL_t/EAR_t (jours EAR>0), base AUM eq, vol glissante ×√252, drawdown sur cumul quotidien.
+<br>Exposition (positions) : Long = Σ Pure Exposure &gt; 0 · Short = Σ Pure Exposure &lt; 0 · Gross = Long − Short · Net = Long + Short (colonne Pure Exposure, snapshots hebdomadaires). NAV = médiane(Pure Exposure ÷ Net Exposure) par date ; % NAV rapporté à ce NAV. Overlay gross : gross réel des positions vs EAR ÷ haircut du track record quotidien, filtrés sur la fenêtre. Aucune donnée ne quitte le navigateur.
 </footer>
 </div>
 
@@ -178,6 +207,8 @@ let datasets = [];    // un par fichier : {name, label, daily:[{m,ymd,ear,pnl}],
 let activeIdx = -1;   // -1 = agrégat de tous les fichiers, sinon index dans datasets
 let months = [];
 let dailyRows = [];
+let positionsFiles = [];  // un par export Positions : {name, rows:[{ymd,m,pure,frac}]}
+let exposure = [];        // agrégat par date : [{ymd,m,long,short,gross,net,nav}] trié
 
 const fmt = {
   pct: v => isFinite(v) ? (v*100).toFixed(2).replace('.',',') + ' %' : 'n.m.',
@@ -274,6 +305,91 @@ function parseWorkbook(wb){
     rows.push({m, ymd, ear, cum, dp});   // cumul brut conservé : le nettoyage est rejoué à chaud
   }
   return {label, raw: rows};
+}
+
+// ---- Positions (exposition) ------------------------------------------------------------
+// L'export Positions liste une ligne par position et par date de snapshot. La colonne
+// « Pure Exposure » porte l'exposition signée en EUR (long > 0, short < 0) ; « Net Exposure »
+// la même en fraction du NAV, dont on déduit le NAV par date. On le distingue du daily par
+// la présence de l'en-tête Pure Exposure, avant de tenter le parseur daily.
+function isPositions(wb){
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws, {header:1, defval:null});
+  for(let i = 0; i < Math.min(raw.length, 6); i++){
+    const cells = (raw[i]||[]).map(c => String(c||''));
+    if(cells.some(c => /pure\s*exposure/i.test(c))) return true;
+  }
+  return false;
+}
+
+function parsePositions(wb){
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const date1904 = !!(wb.Workbook && wb.Workbook.WBProps && wb.Workbook.WBProps.date1904);
+  const epoch = date1904 ? Date.UTC(1904,0,1) : Date.UTC(1899,11,30);
+  const raw = XLSX.utils.sheet_to_json(ws, {header:1, defval:null});
+  let hi = -1;
+  for(let i = 0; i < Math.min(raw.length, 6); i++){
+    const cells = (raw[i]||[]).map(c => String(c||''));
+    if(cells.some(c=>/pure\s*exposure/i.test(c)) && cells.some(c=>/date/i.test(c))){ hi = i; break; }
+  }
+  if(hi < 0) throw new Error('en-tête positions introuvable (Date + Pure Exposure)');
+  const hdr = raw[hi].map(c => String(c||''));
+  const dateIdx = hdr.findIndex(c=>/date/i.test(c));
+  let pureIdx = hdr.findIndex(c=>/pure\s*exposure/i.test(c));
+  if(pureIdx < 0) pureIdx = 8;                                    // colonne I par défaut
+  // « Net Exposure » exact : sinon /net/ matcherait AIFM Net ou Net Rho et fausserait le NAV.
+  let netIdx = hdr.findIndex(c=>/^\s*net\s*exposure\s*$/i.test(c));
+  if(netIdx < 0) netIdx = 11;                                     // colonne L par défaut
+
+  const rows = [];
+  for(let i = hi+1; i < raw.length; i++){
+    const r = raw[i]; if(!r) continue;
+    const d = r[dateIdx]; if(d == null) continue;
+    let ymd = null;
+    if(typeof d === 'number'){
+      ymd = new Date(epoch + Math.round(d)*86400000).toISOString().slice(0,10);
+    } else if(d instanceof Date){
+      ymd = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    } else {
+      const s = String(d).trim();
+      let mm = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if(mm) ymd = mm[1] + '-' + mm[2] + '-' + mm[3];
+      else { mm = s.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})/); if(mm) ymd = mm[3] + '-' + mm[2].padStart(2,'0') + '-' + mm[1].padStart(2,'0'); }
+    }
+    if(!ymd) continue;
+    const m = ymd.slice(0,7);
+    if(!/^(19|20)\d{2}-(0[1-9]|1[0-2])$/.test(m)) continue;
+    const pure = Number(r[pureIdx]);
+    if(!isFinite(pure)) continue;
+    const frac = Number(r[netIdx]);
+    rows.push({ymd, m, pure, frac: isFinite(frac) ? frac : 0});
+  }
+  return rows;
+}
+
+function median(arr){
+  const s = [...arr].sort((a,b)=>a-b); const n = s.length;
+  if(!n) return NaN;
+  return n % 2 ? s[(n-1)/2] : (s[n/2-1] + s[n/2]) / 2;
+}
+
+// Union des dates sur tous les exports Positions (comme le daily : deux fichiers = deux
+// périmètres sommés). NAV par date = médiane des Pure/Net non nuls, robuste aux arrondis et
+// aux livres market-neutral où la somme des fractions frôle 0.
+function aggregateExposure(){
+  const byD = new Map();
+  for(const f of positionsFiles) for(const r of f.rows){
+    let o = byD.get(r.ymd);
+    if(!o){ o = {ymd:r.ymd, m:r.m, pures:[], ratios:[]}; byD.set(r.ymd, o); }
+    o.pures.push(r.pure);
+    if(Math.abs(r.frac) > 1e-9) o.ratios.push(r.pure / r.frac);
+  }
+  exposure = [...byD.values()].map(o => {
+    let long = 0, short = 0;
+    for(const p of o.pures){ if(p > 0) long += p; else short += p; }
+    return {ymd:o.ymd, m:o.m, long, short, gross: long - short, net: long + short,
+      nav: o.ratios.length ? median(o.ratios) : NaN};
+  }).sort((a,b)=>a.ymd.localeCompare(b.ymd));
 }
 
 // Jours ouvrés séparant deux lignes, week-ends exclus. Un pont Vendredi→Lundi vaut 1.
@@ -376,6 +492,7 @@ function render(){
   ).join('');
 
   renderCharts(from, to, h, lg, ag);
+  renderExposure();
 
   let nav = 100;
   document.querySelector('#monthly tbody').innerHTML = months.map(o => {
@@ -397,11 +514,14 @@ function render(){
 function initSelectors(keepWindow){
   const f = document.getElementById('w_from'), t = document.getElementById('w_to');
   const prevF = f.value, prevT = t.value;
-  const opts = months.map(o => `<option value="${o.m}">${o.m}</option>`).join('');
+  // Union des mois daily et positions : les snapshots hors de la plage du track record
+  // (ex. positions de juillet quand le daily s'arrête en juin) restent sélectionnables.
+  const allM = [...new Set([...months.map(o=>o.m), ...exposure.map(o=>o.m)])].sort();
+  const opts = allM.map(m => `<option value="${m}">${m}</option>`).join('');
   f.innerHTML = opts; t.innerHTML = opts;
-  if(!months.length) return;
-  const first = months[0].m, last = months[months.length-1].m;
-  const has = m => months.some(o => o.m === m);
+  if(!allM.length) return;
+  const first = allM[0], last = allM[allM.length-1];
+  const has = m => allM.includes(m);
   f.value = keepWindow && has(prevF) ? prevF : first;
   t.value = keepWindow && has(prevT) ? prevT : last;
   if(f.value > t.value){ f.value = first; t.value = last; }
@@ -416,12 +536,19 @@ function dispName(ds){
 }
 
 function renderFiles(){
-  document.getElementById('chips').innerHTML = datasets.map((ds,i) => {
+  const dailyChips = datasets.map((ds,i) => {
     const ms = [...new Set(ds.daily.map(r=>r.m))].sort();
     const range = ms.length ? ms[0] + ' → ' + ms[ms.length-1] : 'aucun jour retenu';
     const rm = ds.isDefault ? '' : `<button data-rm="${i}" title="Retirer" aria-label="Retirer ${esc(dispName(ds))}">×</button>`;
     return `<span class="chip" title="${esc(ds.name)} — ${range}">${esc(dispName(ds))}<span class="n">${ms.length} m</span>${rm}</span>`;
   }).join('');
+  const posChips = positionsFiles.map((f,i) => {
+    const ds = [...new Set(f.rows.map(r=>r.ymd))].sort();
+    const range = ds.length ? ds[0] + ' → ' + ds[ds.length-1] : 'aucune date';
+    const nm = f.name.replace(/\.(xlsx?|csv)$/i,'');
+    return `<span class="chip chip-pos" title="${esc(f.name)} — positions ${range}">${esc(nm)}<span class="n">${ds.length} snap</span><button data-rmpos="${i}" title="Retirer" aria-label="Retirer ${esc(nm)}">×</button></span>`;
+  }).join('');
+  document.getElementById('chips').innerHTML = dailyChips + posChips;
 
   const wrap = document.getElementById('sleevewrap'), sel = document.getElementById('sleeve');
   const multi = datasets.length > 1;
@@ -454,6 +581,7 @@ function refresh(keepWindow){
   const sets = activeIdx >= 0 && datasets[activeIdx] ? [datasets[activeIdx]] : datasets;
   dailyRows = aggregate(sets);
   buildMonths(dailyRows);
+  aggregateExposure();
   renderFiles();
   renderCleanLog(sets);
   initSelectors(keepWindow);
@@ -466,9 +594,15 @@ function readFile(file){
     rd.onload = e => {
       try{
         const wb = XLSX.read(new Uint8Array(e.target.result), {type:'array'});
-        const {label, raw} = parseWorkbook(wb);
-        if(!raw.length) throw new Error('aucune donnée exploitable');
-        res({name: file.name, label, raw});
+        if(isPositions(wb)){
+          const rows = parsePositions(wb);
+          if(!rows.length) throw new Error('aucune position exploitable');
+          res({name: file.name, kind: 'positions', rows});
+        } else {
+          const {label, raw} = parseWorkbook(wb);
+          if(!raw.length) throw new Error('aucune donnée exploitable');
+          res({name: file.name, kind: 'daily', label, raw});
+        }
       }catch(err){ rej(new Error(file.name + ' : ' + err.message)); }
     };
     rd.onerror = () => rej(new Error(file.name + ' : lecture impossible'));
@@ -482,15 +616,21 @@ async function handleFiles(files){
     try{ added.push(await readFile(f)); }
     catch(err){ errs.push(err.message); }
   }
-  if(added.length){
+  const dailyAdd = added.filter(a => a.kind === 'daily');
+  const posAdd = added.filter(a => a.kind === 'positions');
+  if(dailyAdd.length){
     if(datasets.length && datasets[0].isDefault) datasets = [];
-    for(const ds of added){
+    for(const ds of dailyAdd){
       const i = datasets.findIndex(d => d.name === ds.name);
       if(i >= 0) datasets[i] = ds; else datasets.push(ds);   // re-déposer un fichier le met à jour
     }
     activeIdx = -1;
-    refresh(false);
   }
+  for(const p of posAdd){                                     // exports Positions : hors des sleeves daily
+    const i = positionsFiles.findIndex(f => f.name === p.name);
+    if(i >= 0) positionsFiles[i] = p; else positionsFiles.push(p);
+  }
+  if(dailyAdd.length || posAdd.length) refresh(false);
   document.getElementById('fileerr').innerHTML = errs.map(e => 'Erreur — ' + esc(e)).join('<br>');
 }
 
@@ -502,7 +642,13 @@ function removeFile(i){
   refresh(false);
 }
 
-let volChart = null, ddChart = null, navChart = null;
+function removePos(i){
+  positionsFiles.splice(i, 1);
+  document.getElementById('fileerr').textContent = '';
+  refresh(false);
+}
+
+let volChart = null, ddChart = null, navChart = null, lsChart = null, grossChart = null;
 const DIM = '#7d8db0', GRID = 'rgba(30,44,74,0.9)';
 
 function renderCharts(from, to, h, lg, ag){
@@ -572,6 +718,110 @@ function renderCharts(from, to, h, lg, ag){
   });
 }
 
+// NAV interpolé linéairement entre snapshots hebdo, plat au-delà des bornes : sert à ramener
+// le gross impliqué par l'EAR (quotidien) en % du NAV sur les jours situés entre deux positions.
+function navAt(ymd){
+  if(!exposure.length) return NaN;
+  if(ymd <= exposure[0].ymd) return exposure[0].nav;
+  const last = exposure[exposure.length-1];
+  if(ymd >= last.ymd) return last.nav;
+  for(let i = 1; i < exposure.length; i++){
+    if(ymd <= exposure[i].ymd){
+      const a = exposure[i-1], b = exposure[i];
+      const span = Date.parse(b.ymd) - Date.parse(a.ymd);
+      const t = span ? (Date.parse(ymd) - Date.parse(a.ymd)) / span : 0;
+      return a.nav + (b.nav - a.nav) * t;
+    }
+  }
+  return last.nav;
+}
+
+function renderExposure(){
+  const wrap = document.getElementById('exposureWrap');
+  if(!exposure.length){ wrap.classList.add('hidden'); return; }
+  wrap.classList.remove('hidden');
+
+  const asNav = document.getElementById('expunit').value === 'nav';
+  const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
+  const h = Number(document.getElementById('p_h').value)/100;
+  const win = exposure.filter(o => o.m >= from && o.m <= to);
+
+  const conv = (v, nav) => asNav ? (isFinite(nav) && nav ? v/nav : NaN) : v;
+  const fmtV = v => asNav ? fmt.pct(v) : fmt.eurM(v);
+  const yFmt = asNav ? (v => (v*100).toFixed(0) + ' %') : (v => (v/1e6).toFixed(0));
+  const yTitle = asNav ? '% NAV' : 'M€';
+  const xExp = () => ({ ticks:{color:DIM, maxTicksLimit: window.innerWidth<640?5:9, maxRotation:0, autoSkipPadding:12, callback:function(v){return this.getLabelForValue(v).slice(0,10);}}, grid:{display:false} });
+
+  const kpis = document.getElementById('expkpis');
+  if(!win.length){
+    kpis.innerHTML = '<div class="kpi"><div class="l">Exposition</div><div class="v">aucun snapshot dans la fenêtre</div></div>';
+    if(lsChart){ lsChart.destroy(); lsChart = null; }
+    if(grossChart){ grossChart.destroy(); grossChart = null; }
+    document.querySelector('#weekly tbody').innerHTML = '';
+    return;
+  }
+
+  const last = win[win.length-1];
+  kpis.innerHTML = [
+    ['Gross', fmtV(conv(last.gross, last.nav)), 'accent'],
+    ['Long', fmtV(conv(last.long, last.nav)), ''],
+    ['Short', fmtV(conv(last.short, last.nav)), ''],
+    ['Net', fmtV(conv(last.net, last.nav)), 'accent'],
+    ['Net / Gross', fmt.pct(last.gross ? last.net/last.gross : NaN), ''],
+    ['NAV', fmt.eurM(last.nav), ''],
+  ].map(([l,v,c]) => `<div class="kpi"><div class="l">${l} · ${last.ymd}</div><div class="v ${c}">${v}</div></div>`).join('');
+
+  const cLine = (data, color, fill) => ({data, borderColor:color, backgroundColor:fill||'transparent', fill:!!fill, borderWidth:1.8, pointRadius:2, pointHitRadius:6, tension:0});
+  if(lsChart) lsChart.destroy();
+  lsChart = new Chart(document.getElementById('lsChart'), {
+    type:'line',
+    data:{labels:win.map(o=>o.ymd), datasets:[
+      {label:'Long', ...cLine(win.map(o=>conv(o.long,o.nav)), '#4fc38a', 'rgba(79,195,138,0.10)')},
+      {label:'Short', ...cLine(win.map(o=>conv(o.short,o.nav)), '#e06666', 'rgba(224,102,102,0.10)')},
+      {label:'Net', ...cLine(win.map(o=>conv(o.net,o.nav)), '#f2a33c')},
+    ]},
+    options:{responsive:true, maintainAspectRatio:false, animation:false,
+      plugins:{legend:{display:true, labels:{color:DIM, boxWidth:12, font:{size:11}}},
+        tooltip:{callbacks:{label:c=> c.parsed.y==null ? '' : c.dataset.label+' : '+fmtV(c.parsed.y)}}},
+      scales:{x:xExp(), y:{ticks:{color:DIM, callback:yFmt}, grid:{color:GRID}, title:{display:true, text:yTitle, color:DIM}}}}
+  });
+
+  // Gross réel (positions) vs impliqué par l'EAR (daily). Axe = jours du daily dans la fenêtre ;
+  // le gross réel, hebdo, est aligné sur le jour ≤ snapshot et tracé en marches d'escalier.
+  // Axe = union des jours daily et des dates de snapshot, triée : chaque gross réel reste à sa
+  // vraie date (y compris les snapshots au-delà du dernier jour daily), le gross impliqué par
+  // l'EAR n'existe que sur les jours daily (null ailleurs, sans pont pour ne rien inventer).
+  const dwin = dailyRows.filter(r => { const m = r.ymd.slice(0,7); return m >= from && m <= to && r.ear > 0; });
+  const earBy = new Map(dwin.map(r => [r.ymd, r.ear]));
+  const posBy = new Map(win.map(o => [o.ymd, o]));
+  const gl = [...new Set([...dwin.map(r=>r.ymd), ...win.map(o=>o.ymd)])].sort();
+  const real = gl.map(ymd => posBy.has(ymd) ? conv(posBy.get(ymd).gross, posBy.get(ymd).nav) : null);
+  const implied = gl.map(ymd => earBy.has(ymd) ? conv(earBy.get(ymd)/h, navAt(ymd)) : null);
+
+  const gds = [{label:'Gross réel (positions)', data:real, borderColor:'#6ea8ff', fill:false, borderWidth:2, pointRadius:2, pointHitRadius:6, stepped:true, spanGaps:true, tension:0}];
+  if(dwin.length) gds.push({label:'Gross impliqué EAR ÷ haircut', data:implied, borderColor:'#f2a33c', borderDash:[5,4], borderWidth:1.4, pointRadius:0, pointHitRadius:6, spanGaps:false, tension:0.1});
+  if(grossChart) grossChart.destroy();
+  grossChart = new Chart(document.getElementById('grossChart'), {
+    type:'line',
+    data:{labels:gl, datasets:gds},
+    options:{responsive:true, maintainAspectRatio:false, animation:false,
+      plugins:{legend:{display:true, labels:{color:DIM, boxWidth:12, font:{size:11}}},
+        tooltip:{callbacks:{label:c=> c.parsed.y==null ? '' : c.dataset.label+' : '+fmtV(c.parsed.y)}}},
+      scales:{x:xExp(), y:{ticks:{color:DIM, callback:yFmt}, grid:{color:GRID}, title:{display:true, text:yTitle, color:DIM}, beginAtZero:true}}}
+  });
+
+  document.querySelector('#weekly tbody').innerHTML = win.map(o => {
+    const r = o.gross ? o.net/o.gross : NaN;
+    return `<tr><td>${o.ymd}</td>`+
+      `<td class="pos">${fmtV(conv(o.long,o.nav))}</td>`+
+      `<td class="neg">${fmtV(conv(o.short,o.nav))}</td>`+
+      `<td>${fmtV(conv(o.gross,o.nav))}</td>`+
+      `<td class="${o.net>=0?'pos':'neg'}">${fmtV(conv(o.net,o.nav))}</td>`+
+      `<td class="${r>=0?'pos':'neg'}">${fmt.pct(r)}</td>`+
+      `<td>${fmt.eurM(o.nav)}</td></tr>`;
+  }).join('');
+}
+
 // ---- Export .xlsx avec graphiques natifs -----------------------------------------------
 // SheetJS (édition communautaire) n'écrit pas de graphiques : on lui laisse les données, puis
 // on injecte les parties chart/drawing dans le zip. OOXML impose l'ordre des éléments — un
@@ -597,7 +847,7 @@ function axisFmt(maxAbs){
   return '#,##0 "€"';
 }
 
-function chartXml(title, col, nRows, color, idx, fmt){
+function chartXml(sheet, title, col, nRows, color, idx, fmt){
   const idA = 100000001 + idx*2, idB = 100000002 + idx*2;
   const txPr = (sz, c, rot) => `<c:txPr><a:bodyPr${rot ? ` rot="${rot}" vert="horz"` : ''}/><a:lstStyle/>`
     + `<a:p><a:pPr><a:defRPr sz="${sz}" b="0"><a:solidFill><a:srgbClr val="${c}"/></a:solidFill>`
@@ -612,11 +862,11 @@ function chartXml(title, col, nRows, color, idx, fmt){
     + `<a:r><a:rPr lang="fr-FR" sz="1150" b="1"><a:solidFill><a:srgbClr val="${XL_TITLE}"/></a:solidFill><a:latin typeface="${XL_FONT}"/></a:rPr>`
     + `<a:t>${xesc(title)}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/>${noFill}</c:title>`
     + `<c:autoTitleDeleted val="0"/><c:plotArea><c:layout/><c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>`
-    + `<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Daily!$${col}$1</c:f></c:strRef></c:tx>`
+    + `<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>${sheet}!$${col}$1</c:f></c:strRef></c:tx>`
     + `<c:spPr><a:ln w="19050" cap="rnd"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill><a:round/></a:ln><a:effectLst/></c:spPr>`
     + `<c:marker><c:symbol val="none"/></c:marker>`
-    + `<c:cat><c:strRef><c:f>Daily!$A$2:$A$${nRows}</c:f></c:strRef></c:cat>`
-    + `<c:val><c:numRef><c:f>Daily!$${col}$2:$${col}$${nRows}</c:f></c:numRef></c:val>`
+    + `<c:cat><c:strRef><c:f>${sheet}!$A$2:$A$${nRows}</c:f></c:strRef></c:cat>`
+    + `<c:val><c:numRef><c:f>${sheet}!$${col}$2:$${col}$${nRows}</c:f></c:numRef></c:val>`
     + `<c:smooth val="0"/></c:ser><c:marker val="0"/><c:axId val="${idA}"/><c:axId val="${idB}"/></c:lineChart>`
     + `<c:catAx><c:axId val="${idA}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/>`
     + `<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="low"/>`
@@ -674,6 +924,17 @@ function exportMonths(){
   });
 }
 
+// Exposition hebdo dans la fenêtre : montants EUR natifs + équivalent % du NAV.
+function exportExposure(){
+  const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
+  return exposure.filter(o => o.m >= from && o.m <= to).map(o => {
+    const ng = o.gross ? o.net/o.gross : NaN;
+    const navOk = isFinite(o.nav) && o.nav;
+    return [o.ymd, o.long, o.short, o.gross, o.net, isFinite(ng)?ng:null, isFinite(o.nav)?o.nav:null,
+      navOk ? o.gross/o.nav : null, navOk ? o.net/o.nav : null];
+  });
+}
+
 // Formats appliqués cellule par cellule : SheetJS n'a pas de format par colonne.
 function fmtCols(ws, map){
   const rg = XLSX.utils.decode_range(ws['!ref']);
@@ -693,6 +954,8 @@ async function exportXlsx(){
     const d = exportRows();
     if(!d.length) throw new Error('aucune donnée dans la fenêtre courante');
     const nRows = d.length + 1;
+    const ed = exportExposure();
+    const nRowsE = ed.length + 1;
     const view = activeIdx >= 0 ? dispName(datasets[activeIdx]) : `Agrégat (${datasets.length} sleeves)`;
     const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
     const sets = activeIdx >= 0 ? [datasets[activeIdx]] : datasets;
@@ -709,6 +972,14 @@ async function exportXlsx(){
     fmtCols(wsM, {C:'#,##0', D:'#,##0', E:'0.00%', F:'0.00%', G:'0.00%', H:'0.00'});
     wsM['!cols'] = [{wch:9},{wch:6},{wch:14},{wch:14},{wch:10},{wch:10},{wch:10},{wch:11}];
     XLSX.utils.book_append_sheet(wb, wsM, 'Monthly');
+
+    if(ed.length){
+      const wsE = XLSX.utils.aoa_to_sheet([
+        ['Date','Long (€)','Short (€)','Gross (€)','Net (€)','Net/Gross','NAV (€)','Gross (% NAV)','Net (% NAV)'], ...ed]);
+      fmtCols(wsE, {B:'#,##0', C:'#,##0', D:'#,##0', E:'#,##0', F:'0.0%', G:'#,##0', H:'0.0%', I:'0.0%'});
+      wsE['!cols'] = [{wch:11},{wch:15},{wch:15},{wch:15},{wch:15},{wch:10},{wch:15},{wch:13},{wch:13}];
+      XLSX.utils.book_append_sheet(wb, wsE, 'Exposure');
+    }
 
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([[]]), 'Charts');
 
@@ -732,6 +1003,8 @@ async function exportXlsx(){
       [],
       ['Sleeves inclus', 'Fichier source'],
       ...sets.map(x => [dispName(x), x.name]),
+      ...(positionsFiles.length ? [[], ['Positions (exposition)', 'Fichier source'],
+        ...positionsFiles.map(f => [f.name.replace(/\.(xlsx?|csv)$/i,''), f.name])] : []),
     ]);
     fmtCols(wsP, {B:'#,##0'});
     wsP['!cols'] = [{wch:52},{wch:40}];
@@ -749,20 +1022,25 @@ async function exportXlsx(){
     const path = tgt.startsWith('/') ? tgt.slice(1) : 'xl/' + tgt.replace(/^\.\//,'');
     const base = path.split('/').pop();
 
-    // [titre, colonne Excel, index dans d (pour l'échelle d'axe), couleur]
-    const charts = [
-      ['Cumul PnL (€)',     'C', 2, '2E9E6B'],
-      ['EAR (€)',           'D', 3, 'D98324'],
-      ['Long exposure (€)', 'F', 5, '3B6FD4'],
+    // Un chart par entrée : feuille source, colonne Excel, nb de lignes, index dans rows pour
+    // l'échelle d'axe, couleur. Les charts d'exposition pointent la feuille Exposure.
+    const chartCfg = [
+      {sheet:'Daily', title:'Cumul PnL (€)',     col:'C', nRows, rows:d, di:2, color:'2E9E6B'},
+      {sheet:'Daily', title:'EAR (€)',           col:'D', nRows, rows:d, di:3, color:'D98324'},
+      {sheet:'Daily', title:'Long exposure (€)', col:'F', nRows, rows:d, di:5, color:'3B6FD4'},
     ];
-    charts.forEach(([title, colL, di, color], i) => {
-      const maxAbs = d.reduce((a,r) => Math.max(a, Math.abs(r[di])), 0);
-      zip.file(`xl/charts/chart${i+1}.xml`, chartXml(title, colL, nRows, color, i, axisFmt(maxAbs)));
+    if(ed.length){
+      chartCfg.push({sheet:'Exposure', title:'Gross exposure (€)', col:'D', nRows:nRowsE, rows:ed, di:3, color:'2F6FB0'});
+      chartCfg.push({sheet:'Exposure', title:'Net exposure (€)',   col:'E', nRows:nRowsE, rows:ed, di:4, color:'C0552E'});
+    }
+    chartCfg.forEach((c, i) => {
+      const maxAbs = c.rows.reduce((a,r) => Math.max(a, Math.abs(Number(r[c.di])||0)), 0);
+      zip.file(`xl/charts/chart${i+1}.xml`, chartXml(c.sheet, c.title, c.col, c.nRows, c.color, i, axisFmt(maxAbs)));
     });
-    zip.file('xl/drawings/drawing1.xml', drawingXml(charts.length));
+    zip.file('xl/drawings/drawing1.xml', drawingXml(chartCfg.length));
     zip.file('xl/drawings/_rels/drawing1.xml.rels', XHEAD
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-      + charts.map((_,i) => `<Relationship Id="rId${i+1}" Type="${NS_R}/chart" Target="../charts/chart${i+1}.xml"/>`).join('')
+      + chartCfg.map((_,i) => `<Relationship Id="rId${i+1}" Type="${NS_R}/chart" Target="../charts/chart${i+1}.xml"/>`).join('')
       + '</Relationships>');
     zip.file(`xl/worksheets/_rels/${base}.rels`, XHEAD
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -776,7 +1054,7 @@ async function exportXlsx(){
     let ct = await zip.file('[Content_Types].xml').async('string');
     ct = ct.replace('</Types>',
       '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
-      + charts.map((_,i) => `<Override PartName="/xl/charts/chart${i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`).join('')
+      + chartCfg.map((_,i) => `<Override PartName="/xl/charts/chart${i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`).join('')
       + '</Types>');
     zip.file('[Content_Types].xml', ct);
 
@@ -802,8 +1080,11 @@ drop.addEventListener('dragleave', ()=>drop.classList.remove('over'));
 drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); e.dataTransfer.files.length && handleFiles(e.dataTransfer.files); });
 document.getElementById('chips').addEventListener('click', e => {
   const b = e.target.closest('button[data-rm]');
-  if(b) removeFile(Number(b.dataset.rm));
+  if(b){ removeFile(Number(b.dataset.rm)); return; }
+  const p = e.target.closest('button[data-rmpos]');
+  if(p) removePos(Number(p.dataset.rmpos));
 });
+document.getElementById('expunit').addEventListener('change', renderExposure);
 document.getElementById('sleeve').addEventListener('change', e => { activeIdx = Number(e.target.value); refresh(true); });
 document.getElementById('xport').addEventListener('click', exportXlsx);
 ['p_h','p_l','p_a','p_rf','w_from','w_to','volwin'].forEach(id =>
