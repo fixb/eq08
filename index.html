@@ -924,13 +924,25 @@ function axisFmt(maxAbs){
   return '#,##0 "€"';
 }
 
-function chartXml(sheet, title, col, nRows, color, idx, fmt){
+// series : [{col, color}] — une ou plusieurs droites partageant les mêmes axes. Le nom de série
+// (légende) est lu dans l'en-tête de colonne ; la légende n'apparaît qu'à partir de deux séries.
+function chartXml(sheet, title, series, nRows, idx, fmt){
   const idA = 100000001 + idx*2, idB = 100000002 + idx*2;
   const txPr = (sz, c, rot) => `<c:txPr><a:bodyPr${rot ? ` rot="${rot}" vert="horz"` : ''}/><a:lstStyle/>`
     + `<a:p><a:pPr><a:defRPr sz="${sz}" b="0"><a:solidFill><a:srgbClr val="${c}"/></a:solidFill>`
     + `<a:latin typeface="${XL_FONT}"/></a:defRPr></a:pPr><a:endParaRPr lang="fr-FR"/></a:p></c:txPr>`;
   const line = (w, c) => `<c:spPr><a:ln w="${w}" cap="flat"><a:solidFill><a:srgbClr val="${c}"/></a:solidFill><a:round/></a:ln></c:spPr>`;
   const noFill = '<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>';
+
+  const ser = series.map((s, si) =>
+    `<c:ser><c:idx val="${si}"/><c:order val="${si}"/><c:tx><c:strRef><c:f>${sheet}!$${s.col}$1</c:f></c:strRef></c:tx>`
+    + `<c:spPr><a:ln w="19050" cap="rnd"><a:solidFill><a:srgbClr val="${s.color}"/></a:solidFill><a:round/></a:ln><a:effectLst/></c:spPr>`
+    + `<c:marker><c:symbol val="none"/></c:marker>`
+    + `<c:cat><c:strRef><c:f>${sheet}!$A$2:$A$${nRows}</c:f></c:strRef></c:cat>`
+    + `<c:val><c:numRef><c:f>${sheet}!$${s.col}$2:$${s.col}$${nRows}</c:f></c:numRef></c:val>`
+    + `<c:smooth val="0"/></c:ser>`).join('');
+  const legend = series.length > 1
+    ? `<c:legend><c:legendPos val="b"/><c:overlay val="0"/>${noFill}${txPr(850, XL_TXT)}</c:legend>` : '';
 
   return XHEAD + `<c:chartSpace xmlns:c="${NS_C}" xmlns:a="${NS_A}" xmlns:r="${NS_R}">`
     + `<c:roundedCorners val="0"/><c:chart>`
@@ -939,12 +951,7 @@ function chartXml(sheet, title, col, nRows, color, idx, fmt){
     + `<a:r><a:rPr lang="fr-FR" sz="1150" b="1"><a:solidFill><a:srgbClr val="${XL_TITLE}"/></a:solidFill><a:latin typeface="${XL_FONT}"/></a:rPr>`
     + `<a:t>${xesc(title)}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/>${noFill}</c:title>`
     + `<c:autoTitleDeleted val="0"/><c:plotArea><c:layout/><c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>`
-    + `<c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>${sheet}!$${col}$1</c:f></c:strRef></c:tx>`
-    + `<c:spPr><a:ln w="19050" cap="rnd"><a:solidFill><a:srgbClr val="${color}"/></a:solidFill><a:round/></a:ln><a:effectLst/></c:spPr>`
-    + `<c:marker><c:symbol val="none"/></c:marker>`
-    + `<c:cat><c:strRef><c:f>${sheet}!$A$2:$A$${nRows}</c:f></c:strRef></c:cat>`
-    + `<c:val><c:numRef><c:f>${sheet}!$${col}$2:$${col}$${nRows}</c:f></c:numRef></c:val>`
-    + `<c:smooth val="0"/></c:ser><c:marker val="0"/><c:axId val="${idA}"/><c:axId val="${idB}"/></c:lineChart>`
+    + ser + `<c:marker val="0"/><c:axId val="${idA}"/><c:axId val="${idB}"/></c:lineChart>`
     + `<c:catAx><c:axId val="${idA}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/>`
     + `<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="low"/>`
     + line(9525, XL_AXIS) + txPr(800, XL_TXT, -2700000) + `<c:crossAx val="${idB}"/></c:catAx>`
@@ -954,6 +961,7 @@ function chartXml(sheet, title, col, nRows, color, idx, fmt){
     + `<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>`
     + noFill + txPr(850, XL_TXT) + `<c:crossAx val="${idA}"/></c:valAx>`
     + noFill + `</c:plotArea>`
+    + legend
     + `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/></c:chart>`
     + `<c:spPr><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln><a:noFill/></a:ln></c:spPr>`
     + txPr(900, XL_TXT) + `</c:chartSpace>`;
@@ -1077,6 +1085,10 @@ async function exportXlsx(){
     const sets = activeIdx >= 0 ? [datasets[activeIdx]] : datasets;
 
     const wb = XLSX.utils.book_new();
+    // Feuille Charts en tête : c'est l'onglet ouvert par défaut. Les graphes y seront injectés
+    // après coup ; ils référencent les autres feuilles par nom, l'ordre d'ajout n'a pas d'importance.
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([[]]), 'Charts');
+
     const wsD = XLSX.utils.aoa_to_sheet([
       ['Date','PnL (€)','Cumul PnL (€)','EAR (€)','Gross (€)','Long exposure (€)','Short exposure (€)','AUM eq (€)'], ...d]);
     fmtCols(wsD, {B:'#,##0', C:'#,##0', D:'#,##0', E:'#,##0', F:'#,##0', G:'#,##0', H:'#,##0'});
@@ -1102,8 +1114,6 @@ async function exportXlsx(){
       wsE['!cols'] = [{wch:11},{wch:15},{wch:15},{wch:15},{wch:15},{wch:10},{wch:15},{wch:13},{wch:13}];
       XLSX.utils.book_append_sheet(wb, wsE, 'Exposure');
     }
-
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([[]]), 'Charts');
 
     // Le nettoyage s'applique au sleeve entier avant tout découpage : ces compteurs couvrent
     // donc tout l'historique, pas la fenêtre exportée. Le libeller, sinon on les lit de travers.
@@ -1147,20 +1157,21 @@ async function exportXlsx(){
     const path = tgt.startsWith('/') ? tgt.slice(1) : 'xl/' + tgt.replace(/^\.\//,'');
     const base = path.split('/').pop();
 
-    // Un chart par entrée : feuille source, colonne Excel, nb de lignes, index dans rows pour
-    // l'échelle d'axe, couleur. Les charts d'exposition pointent la feuille Exposure.
+    // Un chart par entrée : feuille source, nb de lignes, et une ou plusieurs séries
+    // {col Excel, di index dans rows pour l'échelle d'axe, couleur}. Exposition → feuille Exposure.
     const chartCfg = [
-      {sheet:'Daily', title:'Cumul PnL (€)',     col:'C', nRows, rows:d, di:2, color:'2E9E6B'},
-      {sheet:'Daily', title:'EAR (€)',           col:'D', nRows, rows:d, di:3, color:'D98324'},
-      {sheet:'Daily', title:'Long exposure (€)', col:'F', nRows, rows:d, di:5, color:'3B6FD4'},
+      {sheet:'Daily', title:'Cumul PnL (€)', nRows, rows:d, series:[{col:'C', di:2, color:'2E9E6B'}]},
+      {sheet:'Daily', title:'EAR (€)',       nRows, rows:d, series:[{col:'D', di:3, color:'D98324'}]},
+      {sheet:'Daily', title:'Long / Short exposure (€)', nRows, rows:d,
+        series:[{col:'F', di:5, color:'3B6FD4'}, {col:'G', di:6, color:'C0552E'}]},
     ];
     if(ed.length){
-      chartCfg.push({sheet:'Exposure', title:'Gross exposure (€)', col:'D', nRows:nRowsE, rows:ed, di:3, color:'2F6FB0'});
-      chartCfg.push({sheet:'Exposure', title:'Net exposure (€)',   col:'E', nRows:nRowsE, rows:ed, di:4, color:'C0552E'});
+      chartCfg.push({sheet:'Exposure', title:'Gross exposure (€)', nRows:nRowsE, rows:ed, series:[{col:'D', di:3, color:'2F6FB0'}]});
+      chartCfg.push({sheet:'Exposure', title:'Net exposure (€)',   nRows:nRowsE, rows:ed, series:[{col:'E', di:4, color:'C0552E'}]});
     }
     chartCfg.forEach((c, i) => {
-      const maxAbs = c.rows.reduce((a,r) => Math.max(a, Math.abs(Number(r[c.di])||0)), 0);
-      zip.file(`xl/charts/chart${i+1}.xml`, chartXml(c.sheet, c.title, c.col, c.nRows, c.color, i, axisFmt(maxAbs)));
+      const maxAbs = c.rows.reduce((a,r) => Math.max(a, ...c.series.map(s => Math.abs(Number(r[s.di])||0))), 0);
+      zip.file(`xl/charts/chart${i+1}.xml`, chartXml(c.sheet, c.title, c.series, c.nRows, i, axisFmt(maxAbs)));
     });
     zip.file('xl/drawings/drawing1.xml', drawingXml(chartCfg.length));
     zip.file('xl/drawings/_rels/drawing1.xml.rels', XHEAD
