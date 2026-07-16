@@ -1142,10 +1142,16 @@ async function exportXlsx(){
     if(!/<sheetPr\b/.test(sx)) sx = sx.replace(/(<worksheet[^>]*>)/, '$1<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>');
     else if(!/<pageSetUpPr/.test(sx)) sx = sx.replace(/<sheetPr([^>]*)>/, '<sheetPr$1><pageSetUpPr fitToPage="1"/>');
     sx = sx.replace(/<pageMargins[^>]*\/>/, '');   // on repose nos propres marges serrées
-    // Ordre imposé par le schéma : pageMargins, puis pageSetup, puis drawing en fin de séquence.
-    const tail = '<pageMargins left="0.4" right="0.4" top="0.4" bottom="0.4" header="0.2" footer="0.2"/>'
-      + '<pageSetup orientation="portrait" fitToWidth="1" fitToHeight="1"/><drawing r:id="rId1"/>';
-    zip.file(path, sx.replace('</worksheet>', tail + '</worksheet>'));
+    // Ordre du schéma CT_Worksheet : pageMargins(21) puis pageSetup(22) doivent précéder
+    // ignoredErrors(28) et drawing(30). Les poser en fin de séquence les placerait après le
+    // <ignoredErrors> que SheetJS ajoute sur la feuille Charts → Excel rejette et retire les graphes.
+    const pageBlock = '<pageMargins left="0.4" right="0.4" top="0.4" bottom="0.4" header="0.2" footer="0.2"/>'
+      + '<pageSetup orientation="portrait" fitToWidth="1" fitToHeight="1"/>';
+    sx = /<ignoredErrors/.test(sx)
+      ? sx.replace('<ignoredErrors', pageBlock + '<ignoredErrors')
+      : sx.replace('</worksheet>', pageBlock + '</worksheet>');
+    sx = sx.replace('</worksheet>', '<drawing r:id="rId1"/></worksheet>');   // drawing en toute fin
+    zip.file(path, sx);
 
     let ct = await zip.file('[Content_Types].xml').async('string');
     ct = ct.replace('</Types>',
