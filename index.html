@@ -913,7 +913,7 @@ const NS_XDR = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDraw
 const XHEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 // Emprise d'un graphe exporté et disposition en grille 2 colonnes (en cellules) :
 // largeur, hauteur, gouttières horizontale/verticale. Feuille Charts en paysage.
-const CH_COLS = 9, CH_ROWS = 14, CH_COLGAP = 1, CH_ROWGAP = 1, CH_NCOL = 2;
+const CH_COLS = 9, CH_ROWS = 14, CH_COLGAP = 1, CH_ROWGAP = 1, CH_NCOL = 2, CH_BIGROWS = 24;
 
 function xesc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
 
@@ -981,18 +981,38 @@ function chartXml(sheet, title, series, nRows, idx, fmt, bounds){
     + txPr(900, XL_TXT) + `</c:chartSpace>`;
 }
 
-function drawingXml(n){
+// Ancrages des graphes : ceux marqués `big` prennent toute la largeur (empilés en tête, plus
+// hauts), les autres suivent dessous en grille 2 colonnes. Renvoie [{c0,r0,c1,r1}] dans l'ordre
+// des cfgs (donc les `big` doivent précéder les autres). CH_BIGROWS = hauteur du grand graphe.
+function chartAnchors(cfgs){
+  const fullW = 2*CH_COLS + CH_COLGAP;
+  const anchors = [];
+  let y = 0, gridStart = null, gi = 0;
+  for(const c of cfgs){
+    if(c.big){
+      anchors.push({c0:0, r0:y, c1:fullW, r1:y+CH_BIGROWS});
+      y += CH_BIGROWS + CH_ROWGAP;
+    } else {
+      if(gridStart === null) gridStart = y;
+      const gc = gi % CH_NCOL, gr = Math.floor(gi / CH_NCOL);
+      const c0 = gc*(CH_COLS+CH_COLGAP), r0 = gridStart + gr*(CH_ROWS+CH_ROWGAP);
+      anchors.push({c0, r0, c1:c0+CH_COLS, r1:r0+CH_ROWS});
+      gi++;
+    }
+  }
+  return anchors;
+}
+
+function drawingXml(anchors){
   let out = XHEAD + `<xdr:wsDr xmlns:xdr="${NS_XDR}" xmlns:a="${NS_A}">`;
-  for(let i = 0; i < n; i++){
-    const c0 = (i % CH_NCOL) * (CH_COLS + CH_COLGAP);            // grille : colonne 0 / 1
-    const r0 = Math.floor(i / CH_NCOL) * (CH_ROWS + CH_ROWGAP);  // ligne de la grille
-    out += `<xdr:twoCellAnchor><xdr:from><xdr:col>${c0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${r0}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>`
-      + `<xdr:to><xdr:col>${c0+CH_COLS}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${r0+CH_ROWS}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>`
+  anchors.forEach((a, i) => {
+    out += `<xdr:twoCellAnchor><xdr:from><xdr:col>${a.c0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${a.r0}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>`
+      + `<xdr:to><xdr:col>${a.c1}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${a.r1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>`
       + `<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="${i+2}" name="Chart ${i+1}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>`
       + `<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>`
       + `<a:graphic><a:graphicData uri="${NS_C}"><c:chart xmlns:c="${NS_C}" xmlns:r="${NS_R}" r:id="rId${i+1}"/></a:graphicData></a:graphic>`
       + `</xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>`;
-  }
+  });
   return out + '</xdr:wsDr>';
 }
 
@@ -1233,10 +1253,10 @@ async function exportXlsx(){
       const wr = exportWeeksReal();                    // identique aux lignes de la feuille Weekly
       const nRowsW = wr.length + 1;
       chartCfg = [
+        {sheet:'Weekly', title:'Long / Short exposure (€)', nRows:nRowsW, rows:wr, sym:true, big:true,
+          series:[{col:'I', di:8, color:'3B6FD4'}, {col:'J', di:9, color:'C0552E'}]},
         {sheet:'Daily',  title:'Cumul PnL (€)', nRows, rows:d, series:[{col:'C', di:2, color:'2E9E6B'}]},
         {sheet:'Weekly', title:'EAR (€)', nRows:nRowsW, rows:wr, series:[{col:'G', di:6, color:'D98324'}]},
-        {sheet:'Weekly', title:'Long / Short exposure (€)', nRows:nRowsW, rows:wr, sym:true,
-          series:[{col:'I', di:8, color:'3B6FD4'}, {col:'J', di:9, color:'C0552E'}]},
         {sheet:'Weekly', title:'Gross exposure (€)', nRows:nRowsW, rows:wr, series:[{col:'H', di:7, color:'2F6FB0'}]},
         {sheet:'Weekly', title:'Net exposure (€)',   nRows:nRowsW, rows:wr, series:[{col:'K', di:10, color:'C0552E'}]},
       ];
@@ -1252,7 +1272,8 @@ async function exportXlsx(){
       const bounds = c.sym ? {min: -niceCeil(maxAbs), max: niceCeil(maxAbs)} : null;   // axe centré sur 0
       zip.file(`xl/charts/chart${i+1}.xml`, chartXml(c.sheet, c.title, c.series, c.nRows, i, axisFmt(maxAbs), bounds));
     });
-    zip.file('xl/drawings/drawing1.xml', drawingXml(chartCfg.length));
+    const anchors = chartAnchors(chartCfg);
+    zip.file('xl/drawings/drawing1.xml', drawingXml(anchors));
     zip.file('xl/drawings/_rels/drawing1.xml.rels', XHEAD
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + chartCfg.map((_,i) => `<Relationship Id="rId${i+1}" Type="${NS_R}/chart" Target="../charts/chart${i+1}.xml"/>`).join('')
@@ -1261,12 +1282,10 @@ async function exportXlsx(){
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${NS_R}/drawing" Target="../drawings/drawing1.xml"/></Relationships>`);
 
-    // Zone d'impression = emprise de la pile de graphes ; couplée à fitToPage portrait, elle
-    // ramène toute la feuille Charts sur une seule page.
-    const gridRows = Math.ceil(chartCfg.length / CH_NCOL);
-    const lastRow = (gridRows - 1) * (CH_ROWS + CH_ROWGAP) + CH_ROWS;
-    const rightCols = (chartCfg.length >= 2 ? CH_COLS + CH_COLGAP + CH_COLS : CH_COLS);
-    const printRef = `Charts!$A$1:$${XLSX.utils.encode_col(rightCols)}$${lastRow + 1}`;
+    // Zone d'impression = emprise réelle des graphes (grand pleine largeur + grille dessous),
+    // couplée à fitToPage largeur=1 paysage.
+    const maxCol = Math.max(...anchors.map(a => a.c1)), maxRow = Math.max(...anchors.map(a => a.r1));
+    const printRef = `Charts!$A$1:$${XLSX.utils.encode_col(maxCol)}$${maxRow + 1}`;
     const dn = `<definedName name="_xlnm.Print_Area" localSheetId="${chartsIdx}">${printRef}</definedName>`;
     const wbOut = /<definedNames>/.test(wbXmlStr)
       ? wbXmlStr.replace('<definedNames>', '<definedNames>' + dn)
