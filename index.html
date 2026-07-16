@@ -991,9 +991,8 @@ function exportRows(){
     .filter(r => { const m = r.ymd.slice(0,7); return m >= from && m <= to && r.ear > 0; })
     .map(r => {
       cum += r.pnl;
-      // Short en négatif : Long + Short = Net, Long − Short = Gross, comme l'onglet Exposure.
-      const gross = r.ear/h, long = gross*(1+lg)/2, short = -gross*(1-lg)/2;
-      return [r.ymd, r.pnl, cum, r.ear, gross, long, short, long/ag];
+      const gross = r.ear/h, long = gross*(1+lg)/2;
+      return [r.ymd, r.pnl, cum, r.ear, gross, long, long/ag];
     });
 }
 
@@ -1021,30 +1020,41 @@ function isoWeek(ymd){
   return dt.getUTCFullYear() + '-W' + String(w).padStart(2,'0');
 }
 
-// Track record agrégé par semaine ISO dans la fenêtre — pendant hebdomadaire de l'onglet Monthly.
+// Track record agrégé par semaine ISO — pendant hebdomadaire de Monthly — enrichi des
+// expositions réelles (Pure Exposure) du snapshot de positions tombant dans la semaine.
+// Union des semaines : un snapshot hors de la plage du track record (positions de juillet
+// alors que le daily s'arrête en juin) apparaît quand même, colonnes de rendement vides.
 function exportWeeks(){
   const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
   const h  = Number(document.getElementById('p_h').value)/100;
   const lg = Number(document.getElementById('p_l').value)/100;
   const ag = Number(document.getElementById('p_a').value)/100;
   const byW = new Map();
+  const get = wk => { let o = byW.get(wk); if(!o){ o = {wk, first:null, last:null, days:0, pnl:0, earSum:0, exp:null}; byW.set(wk, o); } return o; };
+  const span = (o, ymd) => { if(!o.first || ymd < o.first) o.first = ymd; if(!o.last || ymd > o.last) o.last = ymd; };
   for(const r of dailyRows){
     const m = r.ymd.slice(0,7);
     if(m < from || m > to || !(r.ear > 0)) continue;
-    const wk = isoWeek(r.ymd);
-    let o = byW.get(wk);
-    if(!o){ o = {wk, first:r.ymd, last:r.ymd, days:0, pnl:0, earSum:0}; byW.set(wk, o); }
-    o.days++; o.pnl += r.pnl; o.earSum += r.ear;
-    if(r.ymd < o.first) o.first = r.ymd;
-    if(r.ymd > o.last) o.last = r.ymd;
+    const o = get(isoWeek(r.ymd));
+    o.days++; o.pnl += r.pnl; o.earSum += r.ear; span(o, r.ymd);
+  }
+  for(const e of exposure){
+    if(e.m < from || e.m > to) continue;
+    const o = get(isoWeek(e.ymd));
+    o.exp = e; span(o, e.ymd);   // dernier snapshot de la semaine
   }
   let nav = 100;
-  return [...byW.values()].sort((a,b)=>a.first.localeCompare(b.first)).map(o => {
-    const avgEar = o.days ? o.earSum/o.days : 0;
-    const rE = avgEar > 0 ? o.pnl/avgEar : 0;
-    const rG = rE*h, rL = rE*h*2/(1+lg), rA = rL*ag;
-    nav *= (1+rA);
-    return [o.wk, o.first, o.last, o.days, o.pnl, avgEar, rG, rL, rA, nav];
+  return [...byW.values()].sort((a,b)=>a.wk.localeCompare(b.wk)).map(o => {
+    let avgEar = null, rG = null, rL = null, rA = null, navOut = null, pnl = null, days = null;
+    if(o.days > 0){
+      days = o.days; pnl = o.pnl; avgEar = o.earSum/o.days;
+      const rE = avgEar > 0 ? o.pnl/avgEar : 0;
+      rG = rE*h; rL = rE*h*2/(1+lg); rA = rL*ag;
+      nav *= (1+rA); navOut = nav;
+    }
+    const e = o.exp;
+    return [o.wk, o.first, o.last, days, pnl, avgEar, rG, rL, rA, navOut,
+      e ? e.long : null, e ? e.short : null, e ? e.gross : null, e ? e.net : null];
   });
 }
 
@@ -1090,15 +1100,23 @@ async function exportXlsx(){
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([[]]), 'Charts');
 
     const wsD = XLSX.utils.aoa_to_sheet([
-      ['Date','PnL (€)','Cumul PnL (€)','EAR (€)','Gross (€)','Long exposure (€)','Short exposure (€)','AUM eq (€)'], ...d]);
-    fmtCols(wsD, {B:'#,##0', C:'#,##0', D:'#,##0', E:'#,##0', F:'#,##0', G:'#,##0', H:'#,##0'});
-    wsD['!cols'] = [{wch:11},{wch:14},{wch:15},{wch:14},{wch:15},{wch:18},{wch:18},{wch:15}];
+      ['Date','PnL (€)','Cumul PnL (€)','EAR (€)','Gross (€)','Long exposure (€)','AUM eq (€)'], ...d]);
+    fmtCols(wsD, {B:'#,##0', C:'#,##0', D:'#,##0', E:'#,##0', F:'#,##0', G:'#,##0'});
+    wsD['!cols'] = [{wch:11},{wch:14},{wch:15},{wch:14},{wch:15},{wch:18},{wch:15}];
     XLSX.utils.book_append_sheet(wb, wsD, 'Daily');
 
+    // Colonnes d'exposition réelle (Pure Exposure) seulement si des positions sont chargées.
+    const hasExp = exposure.length > 0;
+    const wRows = exportWeeks();
+    const wHead = ['Week','From','To','Days','PnL (€)','Avg EAR (€)','r Gross','r Long','r AUM eq','NAV AUM eq'];
     const wsW = XLSX.utils.aoa_to_sheet([
-      ['Week','From','To','Days','PnL (€)','Avg EAR (€)','r Gross','r Long','r AUM eq','NAV AUM eq'], ...exportWeeks()]);
-    fmtCols(wsW, {E:'#,##0', F:'#,##0', G:'0.00%', H:'0.00%', I:'0.00%', J:'0.00'});
-    wsW['!cols'] = [{wch:9},{wch:11},{wch:11},{wch:6},{wch:14},{wch:14},{wch:10},{wch:10},{wch:10},{wch:11}];
+      hasExp ? [...wHead,'Long (€)','Short (€)','Gross (€)','Net (€)'] : wHead,
+      ...(hasExp ? wRows : wRows.map(r => r.slice(0,10)))]);
+    fmtCols(wsW, hasExp
+      ? {E:'#,##0', F:'#,##0', G:'0.00%', H:'0.00%', I:'0.00%', J:'0.00', K:'#,##0', L:'#,##0', M:'#,##0', N:'#,##0'}
+      : {E:'#,##0', F:'#,##0', G:'0.00%', H:'0.00%', I:'0.00%', J:'0.00'});
+    wsW['!cols'] = [{wch:9},{wch:11},{wch:11},{wch:6},{wch:14},{wch:14},{wch:10},{wch:10},{wch:10},{wch:11}]
+      .concat(hasExp ? [{wch:15},{wch:15},{wch:15},{wch:15}] : []);
     XLSX.utils.book_append_sheet(wb, wsW, 'Weekly');
 
     const wsM = XLSX.utils.aoa_to_sheet([
@@ -1162,8 +1180,7 @@ async function exportXlsx(){
     const chartCfg = [
       {sheet:'Daily', title:'Cumul PnL (€)', nRows, rows:d, series:[{col:'C', di:2, color:'2E9E6B'}]},
       {sheet:'Daily', title:'EAR (€)',       nRows, rows:d, series:[{col:'D', di:3, color:'D98324'}]},
-      {sheet:'Daily', title:'Long / Short exposure (€)', nRows, rows:d,
-        series:[{col:'F', di:5, color:'3B6FD4'}, {col:'G', di:6, color:'C0552E'}]},
+      {sheet:'Daily', title:'Long exposure (€)', nRows, rows:d, series:[{col:'F', di:5, color:'3B6FD4'}]},
     ];
     if(ed.length){
       chartCfg.push({sheet:'Exposure', title:'Gross exposure (€)', nRows:nRowsE, rows:ed, series:[{col:'D', di:3, color:'2F6FB0'}]});
