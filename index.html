@@ -357,6 +357,9 @@ function parsePositions(wb){
   // « Net Exposure » exact : sinon /net/ matcherait AIFM Net ou Net Rho et fausserait le NAV.
   let netIdx = hdr.findIndex(c=>/^\s*net\s*exposure\s*$/i.test(c));
   if(netIdx < 0) netIdx = 11;                                     // colonne L par défaut
+  // « Equity at Risk » (EAR par position, en fraction du NAV) → EAR réelle du livre par date.
+  let eqrIdx = hdr.findIndex(c=>/equity\s*at\s*risk/i.test(c));
+  if(eqrIdx < 0) eqrIdx = 14;                                     // colonne O par défaut
   // Dimensions de décomposition, repérées par en-tête exact avec repli positionnel.
   const catIdx = {
     sector: hdr.findIndex(c=>/^\s*sector\s*$/i.test(c)),
@@ -390,7 +393,8 @@ function parsePositions(wb){
     const pure = Number(r[pureIdx]);
     if(!isFinite(pure)) continue;
     const frac = Number(r[netIdx]);
-    rows.push({ymd, m, pure, frac: isFinite(frac) ? frac : 0,
+    const eqr = Number(r[eqrIdx]);
+    rows.push({ymd, m, pure, frac: isFinite(frac) ? frac : 0, eqr: isFinite(eqr) ? eqr : 0,
       sector: str(r[catIdx.sector]), country: str(r[catIdx.country]),
       portfolio: str(r[catIdx.portfolio]), allot: str(r[catIdx.allot]),
       underlying: str(r[catIdx.underlying])});
@@ -411,15 +415,17 @@ function aggregateExposure(){
   const byD = new Map();
   for(const f of positionsFiles) for(const r of f.rows){
     let o = byD.get(r.ymd);
-    if(!o){ o = {ymd:r.ymd, m:r.m, pures:[], ratios:[]}; byD.set(r.ymd, o); }
+    if(!o){ o = {ymd:r.ymd, m:r.m, pures:[], ratios:[], eqr:0}; byD.set(r.ymd, o); }
     o.pures.push(r.pure);
+    o.eqr += r.eqr;                                   // EAR en fraction du NAV, cumulée sur le livre
     if(Math.abs(r.frac) > 1e-9) o.ratios.push(r.pure / r.frac);
   }
   exposure = [...byD.values()].map(o => {
     let long = 0, short = 0;
     for(const p of o.pures){ if(p > 0) long += p; else short += p; }
-    return {ymd:o.ymd, m:o.m, long, short, gross: long - short, net: long + short,
-      nav: o.ratios.length ? median(o.ratios) : NaN};
+    const nav = o.ratios.length ? median(o.ratios) : NaN;
+    return {ymd:o.ymd, m:o.m, long, short, gross: long - short, net: long + short, nav,
+      ear: isFinite(nav) ? o.eqr * nav : NaN};       // EAR réelle en € = Σ(Equity at Risk) × NAV
   }).sort((a,b)=>a.ymd.localeCompare(b.ymd));
 }
 
@@ -1058,6 +1064,31 @@ function exportWeeks(){
   });
 }
 
+// Modèle hebdo « réel » : EAR + Long/Short/Gross/Net + NAV pris des Portfolios ; PnL somme du
+// track record sur la période de détention (du snapshot au suivant, dernier → fin des données).
+// Rendements = PnL / exposition mesurée (plus de haircut ni de ratio Net/Gross).
+function exportWeeksReal(){
+  const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
+  const snaps = exposure.filter(o => o.m >= from && o.m <= to);   // déjà trié par date
+  let cum = 0, navIdx = 100;
+  return snaps.map((s, i) => {
+    const start = s.ymd, end = i+1 < snaps.length ? snaps[i+1].ymd : null;   // end exclusif, null = jusqu'à la fin
+    let pnl = 0, days = 0, lastY = start;
+    for(const r of dailyRows){
+      if(r.ymd < start || (end && r.ymd >= end)) continue;
+      pnl += r.pnl; days++; if(r.ymd > lastY) lastY = r.ymd;
+    }
+    cum += pnl;
+    const rEAR = s.ear ? pnl/s.ear : null;
+    const rG = s.gross ? pnl/s.gross : null;
+    const rL = s.long ? pnl/s.long : null;
+    const rN = isFinite(s.nav) && s.nav ? pnl/s.nav : null;
+    if(rN != null) navIdx *= (1 + rN);
+    return [isoWeek(s.ymd), start, lastY, days, pnl, cum, s.ear, s.gross, s.long, s.short, s.net, s.nav,
+      rEAR, rG, rL, rN, rN != null ? navIdx : null];
+  });
+}
+
 // Exposition hebdo dans la fenêtre : montants EUR natifs + équivalent % du NAV.
 function exportExposure(){
   const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
@@ -1105,18 +1136,24 @@ async function exportXlsx(){
     wsD['!cols'] = [{wch:11},{wch:14},{wch:15},{wch:14},{wch:15},{wch:18},{wch:15}];
     XLSX.utils.book_append_sheet(wb, wsD, 'Daily');
 
-    // Colonnes d'exposition réelle (Pure Exposure) seulement si des positions sont chargées.
+    // Avec positions : modèle hebdo réel (EAR + expo Portfolios, PnL track record, rendements
+    // PnL/expo). Sans positions : agrégat hebdo classique du track record (EAR-dérivé).
     const hasExp = exposure.length > 0;
-    const wRows = exportWeeks();
-    const wHead = ['Week','From','To','Days','PnL (€)','Avg EAR (€)','r Gross','r Long','r AUM eq','NAV AUM eq'];
-    const wsW = XLSX.utils.aoa_to_sheet([
-      hasExp ? [...wHead,'Long (€)','Short (€)','Gross (€)','Net (€)'] : wHead,
-      ...(hasExp ? wRows : wRows.map(r => r.slice(0,10)))]);
-    fmtCols(wsW, hasExp
-      ? {E:'#,##0', F:'#,##0', G:'0.00%', H:'0.00%', I:'0.00%', J:'0.00', K:'#,##0', L:'#,##0', M:'#,##0', N:'#,##0'}
-      : {E:'#,##0', F:'#,##0', G:'0.00%', H:'0.00%', I:'0.00%', J:'0.00'});
-    wsW['!cols'] = [{wch:9},{wch:11},{wch:11},{wch:6},{wch:14},{wch:14},{wch:10},{wch:10},{wch:10},{wch:11}]
-      .concat(hasExp ? [{wch:15},{wch:15},{wch:15},{wch:15}] : []);
+    let wsW;
+    if(hasExp){
+      wsW = XLSX.utils.aoa_to_sheet([
+        ['Week','From','To','Days','PnL (€)','Cumul PnL (€)','EAR (€)','Gross (€)','Long (€)','Short (€)','Net (€)','NAV (€)','r / EAR','r / Gross','r / Long','r / NAV','NAV idx'],
+        ...exportWeeksReal()]);
+      fmtCols(wsW, {E:'#,##0', F:'#,##0', G:'#,##0', H:'#,##0', I:'#,##0', J:'#,##0', K:'#,##0', L:'#,##0',
+        M:'0.00%', N:'0.00%', O:'0.00%', P:'0.00%', Q:'0.00'});
+      wsW['!cols'] = [{wch:9},{wch:11},{wch:11},{wch:6},{wch:14},{wch:15},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14},{wch:15},{wch:9},{wch:9},{wch:9},{wch:9},{wch:9}];
+    } else {
+      wsW = XLSX.utils.aoa_to_sheet([
+        ['Week','From','To','Days','PnL (€)','Avg EAR (€)','r Gross','r Long','r AUM eq','NAV AUM eq'],
+        ...exportWeeks().map(r => r.slice(0,10))]);
+      fmtCols(wsW, {E:'#,##0', F:'#,##0', G:'0.00%', H:'0.00%', I:'0.00%', J:'0.00'});
+      wsW['!cols'] = [{wch:9},{wch:11},{wch:11},{wch:6},{wch:14},{wch:14},{wch:10},{wch:10},{wch:10},{wch:11}];
+    }
     XLSX.utils.book_append_sheet(wb, wsW, 'Weekly');
 
     const wsM = XLSX.utils.aoa_to_sheet([
@@ -1177,14 +1214,24 @@ async function exportXlsx(){
 
     // Un chart par entrée : feuille source, nb de lignes, et une ou plusieurs séries
     // {col Excel, di index dans rows pour l'échelle d'axe, couleur}. Exposition → feuille Exposure.
-    const chartCfg = [
-      {sheet:'Daily', title:'Cumul PnL (€)', nRows, rows:d, series:[{col:'C', di:2, color:'2E9E6B'}]},
-      {sheet:'Daily', title:'EAR (€)',       nRows, rows:d, series:[{col:'D', di:3, color:'D98324'}]},
-      {sheet:'Daily', title:'Long exposure (€)', nRows, rows:d, series:[{col:'F', di:5, color:'3B6FD4'}]},
-    ];
-    if(ed.length){
-      chartCfg.push({sheet:'Exposure', title:'Gross exposure (€)', nRows:nRowsE, rows:ed, series:[{col:'D', di:3, color:'2F6FB0'}]});
-      chartCfg.push({sheet:'Exposure', title:'Net exposure (€)',   nRows:nRowsE, rows:ed, series:[{col:'E', di:4, color:'C0552E'}]});
+    let chartCfg;
+    if(hasExp){
+      const wr = exportWeeksReal();                    // identique aux lignes de la feuille Weekly
+      const nRowsW = wr.length + 1;
+      chartCfg = [
+        {sheet:'Daily',  title:'Cumul PnL (€)', nRows, rows:d, series:[{col:'C', di:2, color:'2E9E6B'}]},
+        {sheet:'Weekly', title:'EAR (€)', nRows:nRowsW, rows:wr, series:[{col:'G', di:6, color:'D98324'}]},
+        {sheet:'Weekly', title:'Long / Short exposure (€)', nRows:nRowsW, rows:wr,
+          series:[{col:'I', di:8, color:'3B6FD4'}, {col:'J', di:9, color:'C0552E'}]},
+        {sheet:'Weekly', title:'Gross exposure (€)', nRows:nRowsW, rows:wr, series:[{col:'H', di:7, color:'2F6FB0'}]},
+        {sheet:'Weekly', title:'Net exposure (€)',   nRows:nRowsW, rows:wr, series:[{col:'K', di:10, color:'C0552E'}]},
+      ];
+    } else {
+      chartCfg = [
+        {sheet:'Daily', title:'Cumul PnL (€)', nRows, rows:d, series:[{col:'C', di:2, color:'2E9E6B'}]},
+        {sheet:'Daily', title:'EAR (€)',       nRows, rows:d, series:[{col:'D', di:3, color:'D98324'}]},
+        {sheet:'Daily', title:'Long exposure (€)', nRows, rows:d, series:[{col:'F', di:5, color:'3B6FD4'}]},
+      ];
     }
     chartCfg.forEach((c, i) => {
       const maxAbs = c.rows.reduce((a,r) => Math.max(a, ...c.series.map(s => Math.abs(Number(r[s.di])||0))), 0);
