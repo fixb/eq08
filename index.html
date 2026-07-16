@@ -178,6 +178,23 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
     <div class="chartbox"><canvas id="grossChart" role="img" aria-label="Gross exposure réel des positions comparé au gross impliqué par l'EAR"></canvas></div>
   </div>
 
+  <div class="panel" style="margin-top:18px">
+    <div class="chart-head">
+      <h2 style="margin:0">Décomposition Long / Short</h2>
+      <div style="display:flex;gap:8px">
+        <select id="brkdim" aria-label="Dimension de décomposition">
+          <option value="country">Pays</option>
+          <option value="portfolio">Portefeuille</option>
+          <option value="allot">Instrument</option>
+          <option value="sector">Secteur</option>
+          <option value="underlying">Sous-jacent</option>
+        </select>
+        <select id="brkdate" aria-label="Date du snapshot"></select>
+      </div>
+    </div>
+    <div class="chartbox" style="height:360px"><canvas id="brkChart" role="img" aria-label="Décomposition des expositions longues et shorts par catégorie pour un snapshot"></canvas></div>
+  </div>
+
   <div class="panel" id="weeklyPanel">
     <details>
       <summary>Weekly detail</summary>
@@ -196,7 +213,7 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
 
 <footer>
 r_Gross = r_EAR × haircut · r_Long = r_Gross × 2/(1+Net/Gross) · r_AUM = r_Long × (Long/AUM) — vol échantillon (n−1), Sortino : downside dev vs Rf/12 (÷n), max DD sur chaîne NAV rebasée 100 au début de fenêtre. Charts : rendements quotidiens PnL_t/EAR_t (jours EAR>0), base AUM eq, vol glissante ×√252, drawdown sur cumul quotidien.
-<br>Exposition (positions) : Long = Σ Pure Exposure &gt; 0 · Short = Σ Pure Exposure &lt; 0 · Gross = Long − Short · Net = Long + Short (colonne Pure Exposure, snapshots hebdomadaires). NAV = médiane(Pure Exposure ÷ Net Exposure) par date ; % NAV rapporté à ce NAV. Overlay gross : gross réel des positions vs EAR ÷ haircut du track record quotidien, filtrés sur la fenêtre. Aucune donnée ne quitte le navigateur.
+<br>Exposition (positions) : Long = Σ Pure Exposure &gt; 0 · Short = Σ Pure Exposure &lt; 0 · Gross = Long − Short · Net = Long + Short (colonne Pure Exposure, snapshots hebdomadaires). NAV = médiane(Pure Exposure ÷ Net Exposure) par date ; % NAV rapporté à ce NAV. Overlay gross : gross réel des positions vs EAR ÷ haircut du track record quotidien, filtrés sur la fenêtre. Décomposition Long/Short : longs et shorts d'un snapshot ventilés par pays / portefeuille / instrument / secteur / sous-jacent (top 12 + Autres). Aucune donnée ne quitte le navigateur.
 </footer>
 </div>
 
@@ -340,6 +357,17 @@ function parsePositions(wb){
   // « Net Exposure » exact : sinon /net/ matcherait AIFM Net ou Net Rho et fausserait le NAV.
   let netIdx = hdr.findIndex(c=>/^\s*net\s*exposure\s*$/i.test(c));
   if(netIdx < 0) netIdx = 11;                                     // colonne L par défaut
+  // Dimensions de décomposition, repérées par en-tête exact avec repli positionnel.
+  const catIdx = {
+    sector: hdr.findIndex(c=>/^\s*sector\s*$/i.test(c)),
+    country: hdr.findIndex(c=>/^\s*country\s*$/i.test(c)),
+    portfolio: hdr.findIndex(c=>/^\s*portfolio\s*$/i.test(c)),
+    allot: hdr.findIndex(c=>/^\s*allotment\s*$/i.test(c)),
+    underlying: hdr.findIndex(c=>/^\s*underlying\s*$/i.test(c)),
+  };
+  const catFb = {sector:12, country:13, portfolio:4, allot:5, underlying:7};
+  for(const k in catIdx) if(catIdx[k] < 0) catIdx[k] = catFb[k];
+  const str = v => String(v == null ? '' : v).trim();
 
   const rows = [];
   for(let i = hi+1; i < raw.length; i++){
@@ -362,7 +390,10 @@ function parsePositions(wb){
     const pure = Number(r[pureIdx]);
     if(!isFinite(pure)) continue;
     const frac = Number(r[netIdx]);
-    rows.push({ymd, m, pure, frac: isFinite(frac) ? frac : 0});
+    rows.push({ymd, m, pure, frac: isFinite(frac) ? frac : 0,
+      sector: str(r[catIdx.sector]), country: str(r[catIdx.country]),
+      portfolio: str(r[catIdx.portfolio]), allot: str(r[catIdx.allot]),
+      underlying: str(r[catIdx.underlying])});
   }
   return rows;
 }
@@ -648,7 +679,7 @@ function removePos(i){
   refresh(false);
 }
 
-let volChart = null, ddChart = null, navChart = null, lsChart = null, grossChart = null;
+let volChart = null, ddChart = null, navChart = null, lsChart = null, grossChart = null, brkChart = null;
 const DIM = '#7d8db0', GRID = 'rgba(30,44,74,0.9)';
 
 function renderCharts(from, to, h, lg, ag){
@@ -757,6 +788,7 @@ function renderExposure(){
     kpis.innerHTML = '<div class="kpi"><div class="l">Exposition</div><div class="v">aucun snapshot dans la fenêtre</div></div>';
     if(lsChart){ lsChart.destroy(); lsChart = null; }
     if(grossChart){ grossChart.destroy(); grossChart = null; }
+    if(brkChart){ brkChart.destroy(); brkChart = null; }
     document.querySelector('#weekly tbody').innerHTML = '';
     return;
   }
@@ -808,6 +840,48 @@ function renderExposure(){
       plugins:{legend:{display:true, labels:{color:DIM, boxWidth:12, font:{size:11}}},
         tooltip:{callbacks:{label:c=> c.parsed.y==null ? '' : c.dataset.label+' : '+fmtV(c.parsed.y)}}},
       scales:{x:xExp(), y:{ticks:{color:DIM, callback:yFmt}, grid:{color:GRID}, title:{display:true, text:yTitle, color:DIM}, beginAtZero:true}}}
+  });
+
+  // Décomposition Long/Short d'un snapshot par dimension. Le sélecteur de date est reconstruit
+  // sur la fenêtre courante ; on conserve la date choisie si elle y reste, sinon le dernier snapshot.
+  const dim = document.getElementById('brkdim').value;
+  const dateSel = document.getElementById('brkdate');
+  const winDates = win.map(o => o.ymd);
+  const prevD = dateSel.value;
+  dateSel.innerHTML = winDates.map(d => `<option value="${d}">${d}</option>`).join('');
+  dateSel.value = winDates.includes(prevD) ? prevD : winDates[winDates.length-1];
+  const bd = dateSel.value, bo = win.find(o => o.ymd === bd), navB = bo ? bo.nav : NaN;
+
+  const byCat = new Map();
+  for(const f of positionsFiles) for(const r of f.rows){
+    if(r.ymd !== bd) continue;
+    const cat = (r[dim] || '').trim() || '(n.d.)';
+    let o = byCat.get(cat);
+    if(!o){ o = {cat, long:0, short:0}; byCat.set(cat, o); }
+    if(r.pure > 0) o.long += r.pure; else o.short += r.pure;
+  }
+  let cats = [...byCat.values()].map(o => ({...o, gross: o.long - o.short})).sort((a,b)=>b.gross-a.gross);
+  const N = 12;
+  if(cats.length > N){                                          // au-delà du top N, un cumul « Autres »
+    const tail = cats.slice(N);
+    const rest = {cat:'Autres', long:tail.reduce((a,o)=>a+o.long,0), short:tail.reduce((a,o)=>a+o.short,0)};
+    rest.gross = rest.long - rest.short;
+    cats = [...cats.slice(0, N), rest];
+  }
+  const bconv = v => asNav ? (isFinite(navB) && navB ? v/navB : NaN) : v;
+
+  if(brkChart) brkChart.destroy();
+  brkChart = new Chart(document.getElementById('brkChart'), {
+    type:'bar',
+    data:{labels:cats.map(o=>o.cat), datasets:[
+      {label:'Long', data:cats.map(o=>bconv(o.long)), backgroundColor:'rgba(79,195,138,0.75)', borderColor:'#4fc38a', borderWidth:1},
+      {label:'Short', data:cats.map(o=>bconv(o.short)), backgroundColor:'rgba(224,102,102,0.75)', borderColor:'#e06666', borderWidth:1},
+    ]},
+    options:{indexAxis:'y', responsive:true, maintainAspectRatio:false, animation:false,
+      plugins:{legend:{display:true, labels:{color:DIM, boxWidth:12, font:{size:11}}},
+        tooltip:{callbacks:{label:c=> c.parsed.x == null ? '' : c.dataset.label+' : '+fmtV(c.parsed.x)}}},
+      scales:{x:{stacked:true, ticks:{color:DIM, callback:yFmt}, grid:{color:GRID}, title:{display:true, text:yTitle, color:DIM}},
+        y:{stacked:true, ticks:{color:DIM, font:{size:11}}, grid:{display:false}}}}
   });
 
   document.querySelector('#weekly tbody').innerHTML = win.map(o => {
@@ -1085,6 +1159,8 @@ document.getElementById('chips').addEventListener('click', e => {
   if(p) removePos(Number(p.dataset.rmpos));
 });
 document.getElementById('expunit').addEventListener('change', renderExposure);
+document.getElementById('brkdim').addEventListener('change', renderExposure);
+document.getElementById('brkdate').addEventListener('change', renderExposure);
 document.getElementById('sleeve').addEventListener('change', e => { activeIdx = Number(e.target.value); refresh(true); });
 document.getElementById('xport').addEventListener('click', exportXlsx);
 ['p_h','p_l','p_a','p_rf','w_from','w_to','volwin'].forEach(id =>
