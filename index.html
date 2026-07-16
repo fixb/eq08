@@ -905,6 +905,9 @@ const NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 const NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const NS_XDR = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing';
 const XHEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+// Emprise d'un graphe exporté, en cellules : largeur, hauteur, pas vertical (hauteur + gap).
+// Dimensionnée pour que la pile de graphes tienne sur une page A4 portrait (fitToPage).
+const CH_COLS = 11, CH_ROWS = 11, CH_STEP = 12;
 
 function xesc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
 
@@ -959,8 +962,8 @@ function chartXml(sheet, title, col, nRows, color, idx, fmt){
 function drawingXml(n){
   let out = XHEAD + `<xdr:wsDr xmlns:xdr="${NS_XDR}" xmlns:a="${NS_A}">`;
   for(let i = 0; i < n; i++){
-    out += `<xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${i*21}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>`
-      + `<xdr:to><xdr:col>12</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${i*21+20}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>`
+    out += `<xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${i*CH_STEP}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>`
+      + `<xdr:to><xdr:col>${CH_COLS}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${i*CH_STEP+CH_ROWS}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>`
       + `<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="${i+2}" name="Chart ${i+1}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>`
       + `<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>`
       + `<a:graphic><a:graphicData uri="${NS_C}"><c:chart xmlns:c="${NS_C}" xmlns:r="${NS_R}" r:id="rId${i+1}"/></a:graphicData></a:graphic>`
@@ -1089,8 +1092,11 @@ async function exportXlsx(){
     // Retrouver le fichier de la feuille Charts via workbook.xml + rels plutôt que de parier
     // sur « sheet3.xml » : l'ordre des parties dépend de l'implémentation de l'écrivain.
     const dp = new DOMParser();
-    const wbDoc = dp.parseFromString(await zip.file('xl/workbook.xml').async('string'), 'application/xml');
-    const rid = [...wbDoc.getElementsByTagName('sheet')].find(s => s.getAttribute('name') === 'Charts').getAttribute('r:id');
+    const wbXmlStr = await zip.file('xl/workbook.xml').async('string');
+    const wbDoc = dp.parseFromString(wbXmlStr, 'application/xml');
+    const sheetEls = [...wbDoc.getElementsByTagName('sheet')];
+    const chartsIdx = sheetEls.findIndex(s => s.getAttribute('name') === 'Charts');
+    const rid = sheetEls[chartsIdx].getAttribute('r:id');
     const relDoc = dp.parseFromString(await zip.file('xl/_rels/workbook.xml.rels').async('string'), 'application/xml');
     const tgt = [...relDoc.getElementsByTagName('Relationship')].find(r => r.getAttribute('Id') === rid).getAttribute('Target');
     const path = tgt.startsWith('/') ? tgt.slice(1) : 'xl/' + tgt.replace(/^\.\//,'');
@@ -1120,10 +1126,26 @@ async function exportXlsx(){
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${NS_R}/drawing" Target="../drawings/drawing1.xml"/></Relationships>`);
 
+    // Zone d'impression = emprise de la pile de graphes ; couplée à fitToPage portrait, elle
+    // ramène toute la feuille Charts sur une seule page.
+    const lastRow = (chartCfg.length - 1) * CH_STEP + CH_ROWS;
+    const printRef = `Charts!$A$1:$${XLSX.utils.encode_col(CH_COLS)}$${lastRow + 1}`;
+    const dn = `<definedName name="_xlnm.Print_Area" localSheetId="${chartsIdx}">${printRef}</definedName>`;
+    const wbOut = /<definedNames>/.test(wbXmlStr)
+      ? wbXmlStr.replace('<definedNames>', '<definedNames>' + dn)
+      : wbXmlStr.replace('</sheets>', '</sheets><definedNames>' + dn + '</definedNames>');
+    zip.file('xl/workbook.xml', wbOut);
+
     let sx = await zip.file(path).async('string');
     if(!/xmlns:r=/.test(sx)) sx = sx.replace(/<worksheet\s/, `<worksheet xmlns:r="${NS_R}" `);
-    // <drawing> se place en fin de séquence, après pageMargins/pageSetup s'ils existent.
-    zip.file(path, sx.replace('</worksheet>', '<drawing r:id="rId1"/></worksheet>'));
+    // fitToPage doit vivre dans sheetPr/pageSetUpPr (1er enfant), sinon fitToWidth/Height sont ignorés.
+    if(!/<sheetPr\b/.test(sx)) sx = sx.replace(/(<worksheet[^>]*>)/, '$1<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>');
+    else if(!/<pageSetUpPr/.test(sx)) sx = sx.replace(/<sheetPr([^>]*)>/, '<sheetPr$1><pageSetUpPr fitToPage="1"/>');
+    sx = sx.replace(/<pageMargins[^>]*\/>/, '');   // on repose nos propres marges serrées
+    // Ordre imposé par le schéma : pageMargins, puis pageSetup, puis drawing en fin de séquence.
+    const tail = '<pageMargins left="0.4" right="0.4" top="0.4" bottom="0.4" header="0.2" footer="0.2"/>'
+      + '<pageSetup orientation="portrait" fitToWidth="1" fitToHeight="1"/><drawing r:id="rId1"/>';
+    zip.file(path, sx.replace('</worksheet>', tail + '</worksheet>'));
 
     let ct = await zip.file('[Content_Types].xml').async('string');
     ct = ct.replace('</Types>',
