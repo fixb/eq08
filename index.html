@@ -161,10 +161,7 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
 
 <div id="exposureWrap" class="hidden">
   <div class="panel" style="margin-top:18px">
-    <div class="chart-head">
-      <h2 style="margin:0">Exposition — positions hebdomadaires</h2>
-      <select id="expunit" aria-label="Unité des expositions"><option value="eur">EUR</option><option value="nav">% du NAV</option></select>
-    </div>
+    <h2>Exposition — positions hebdomadaires (€)</h2>
     <div class="kpis" id="expkpis" style="margin-top:12px;margin-bottom:0"></div>
   </div>
 
@@ -198,7 +195,7 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
   <div class="panel" id="weeklyPanel">
     <details>
       <summary>Weekly detail</summary>
-      <div class="tscroll"><table id="weekly"><thead><tr><th>Date</th><th>Long</th><th>Short</th><th>Gross</th><th>Net</th><th>Net/Gross</th><th>NAV</th></tr></thead><tbody></tbody></table></div>
+      <div class="tscroll"><table id="weekly"><thead><tr><th>Date</th><th>Long</th><th>Short</th><th>Gross</th><th>Net</th><th>Net/Gross</th></tr></thead><tbody></tbody></table></div>
     </details>
   </div>
 </div>
@@ -213,7 +210,7 @@ footer{margin-top:26px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;co
 
 <footer>
 r_Gross = r_EAR × haircut · r_Long = r_Gross × 2/(1+Net/Gross) · r_AUM = r_Long × (Long/AUM) — vol échantillon (n−1), Sortino : downside dev vs Rf/12 (÷n), max DD sur chaîne NAV rebasée 100 au début de fenêtre. Charts : rendements quotidiens PnL_t/EAR_t (jours EAR>0), base AUM eq, vol glissante ×√252, drawdown sur cumul quotidien.
-<br>Exposition (positions) : Long = Σ Pure Exposure &gt; 0 · Short = Σ Pure Exposure &lt; 0 · Gross = Long − Short · Net = Long + Short (colonne Pure Exposure, snapshots hebdomadaires). NAV = médiane(Pure Exposure ÷ Net Exposure) par date ; % NAV rapporté à ce NAV. Overlay gross : gross réel des positions vs EAR ÷ haircut du track record quotidien, filtrés sur la fenêtre. Décomposition Long/Short : longs et shorts d'un snapshot ventilés par pays / portefeuille / instrument / secteur / sous-jacent (top 12 + Autres). Aucune donnée ne quitte le navigateur.
+<br>Exposition (positions) : Long = Σ Pure Exposure &gt; 0 · Short = Σ Pure Exposure &lt; 0 · Gross = Long − Short · Net = Long + Short (colonne Pure Exposure, snapshots hebdomadaires), en € (vue stand-alone du sleeve). Overlay gross : gross réel des positions vs EAR ÷ haircut du track record quotidien, filtrés sur la fenêtre. Décomposition Long/Short : longs et shorts d'un snapshot ventilés par pays / portefeuille / instrument / secteur / sous-jacent (top 12 + Autres). Aucune donnée ne quitte le navigateur.
 </footer>
 </div>
 
@@ -755,38 +752,18 @@ function renderCharts(from, to, h, lg, ag){
   });
 }
 
-// NAV interpolé linéairement entre snapshots hebdo, plat au-delà des bornes : sert à ramener
-// le gross impliqué par l'EAR (quotidien) en % du NAV sur les jours situés entre deux positions.
-function navAt(ymd){
-  if(!exposure.length) return NaN;
-  if(ymd <= exposure[0].ymd) return exposure[0].nav;
-  const last = exposure[exposure.length-1];
-  if(ymd >= last.ymd) return last.nav;
-  for(let i = 1; i < exposure.length; i++){
-    if(ymd <= exposure[i].ymd){
-      const a = exposure[i-1], b = exposure[i];
-      const span = Date.parse(b.ymd) - Date.parse(a.ymd);
-      const t = span ? (Date.parse(ymd) - Date.parse(a.ymd)) / span : 0;
-      return a.nav + (b.nav - a.nav) * t;
-    }
-  }
-  return last.nav;
-}
-
 function renderExposure(){
   const wrap = document.getElementById('exposureWrap');
   if(!exposure.length){ wrap.classList.add('hidden'); return; }
   wrap.classList.remove('hidden');
 
-  const asNav = document.getElementById('expunit').value === 'nav';
   const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
   const h = Number(document.getElementById('p_h').value)/100;
   const win = exposure.filter(o => o.m >= from && o.m <= to);
 
-  const conv = (v, nav) => asNav ? (isFinite(nav) && nav ? v/nav : NaN) : v;
-  const fmtV = v => asNav ? fmt.pct(v) : fmt.eurM(v);
-  const yFmt = asNav ? (v => (v*100).toFixed(0) + ' %') : (v => (v/1e6).toFixed(0));
-  const yTitle = asNav ? '% NAV' : 'M€';
+  const fmtV = fmt.eurM;                              // expositions en € (M€) — vue stand-alone
+  const yFmt = v => (v/1e6).toFixed(0);
+  const yTitle = 'M€';
   const xExp = () => ({ ticks:{color:DIM, maxTicksLimit: window.innerWidth<640?5:9, maxRotation:0, autoSkipPadding:12, callback:function(v){return this.getLabelForValue(v).slice(0,10);}}, grid:{display:false} });
 
   const kpis = document.getElementById('expkpis');
@@ -801,12 +778,11 @@ function renderExposure(){
 
   const last = win[win.length-1];
   kpis.innerHTML = [
-    ['Gross', fmtV(conv(last.gross, last.nav)), 'accent'],
-    ['Long', fmtV(conv(last.long, last.nav)), ''],
-    ['Short', fmtV(conv(last.short, last.nav)), ''],
-    ['Net', fmtV(conv(last.net, last.nav)), 'accent'],
+    ['Gross', fmtV(last.gross), 'accent'],
+    ['Long', fmtV(last.long), ''],
+    ['Short', fmtV(last.short), ''],
+    ['Net', fmtV(last.net), 'accent'],
     ['Net / Gross', fmt.pct(last.gross ? last.net/last.gross : NaN), ''],
-    ['NAV', fmt.eurM(last.nav), ''],
   ].map(([l,v,c]) => `<div class="kpi"><div class="l">${l} · ${last.ymd}</div><div class="v ${c}">${v}</div></div>`).join('');
 
   const cLine = (data, color, fill) => ({data, borderColor:color, backgroundColor:fill||'transparent', fill:!!fill, borderWidth:1.8, pointRadius:2, pointHitRadius:6, tension:0});
@@ -814,9 +790,9 @@ function renderExposure(){
   lsChart = new Chart(document.getElementById('lsChart'), {
     type:'line',
     data:{labels:win.map(o=>o.ymd), datasets:[
-      {label:'Long', ...cLine(win.map(o=>conv(o.long,o.nav)), '#4fc38a', 'rgba(79,195,138,0.10)')},
-      {label:'Short', ...cLine(win.map(o=>conv(o.short,o.nav)), '#e06666', 'rgba(224,102,102,0.10)')},
-      {label:'Net', ...cLine(win.map(o=>conv(o.net,o.nav)), '#f2a33c')},
+      {label:'Long', ...cLine(win.map(o=>o.long), '#4fc38a', 'rgba(79,195,138,0.10)')},
+      {label:'Short', ...cLine(win.map(o=>o.short), '#e06666', 'rgba(224,102,102,0.10)')},
+      {label:'Net', ...cLine(win.map(o=>o.net), '#f2a33c')},
     ]},
     options:{responsive:true, maintainAspectRatio:false, animation:false,
       plugins:{legend:{display:true, labels:{color:DIM, boxWidth:12, font:{size:11}}},
@@ -833,8 +809,8 @@ function renderExposure(){
   const earBy = new Map(dwin.map(r => [r.ymd, r.ear]));
   const posBy = new Map(win.map(o => [o.ymd, o]));
   const gl = [...new Set([...dwin.map(r=>r.ymd), ...win.map(o=>o.ymd)])].sort();
-  const real = gl.map(ymd => posBy.has(ymd) ? conv(posBy.get(ymd).gross, posBy.get(ymd).nav) : null);
-  const implied = gl.map(ymd => earBy.has(ymd) ? conv(earBy.get(ymd)/h, navAt(ymd)) : null);
+  const real = gl.map(ymd => posBy.has(ymd) ? posBy.get(ymd).gross : null);
+  const implied = gl.map(ymd => earBy.has(ymd) ? earBy.get(ymd)/h : null);
 
   const gds = [{label:'Gross réel (positions)', data:real, borderColor:'#6ea8ff', fill:false, borderWidth:2, pointRadius:2, pointHitRadius:6, stepped:true, spanGaps:true, tension:0}];
   if(dwin.length) gds.push({label:'Gross impliqué EAR ÷ haircut', data:implied, borderColor:'#f2a33c', borderDash:[5,4], borderWidth:1.4, pointRadius:0, pointHitRadius:6, spanGaps:false, tension:0.1});
@@ -856,7 +832,7 @@ function renderExposure(){
   const prevD = dateSel.value;
   dateSel.innerHTML = winDates.map(d => `<option value="${d}">${d}</option>`).join('');
   dateSel.value = winDates.includes(prevD) ? prevD : winDates[winDates.length-1];
-  const bd = dateSel.value, bo = win.find(o => o.ymd === bd), navB = bo ? bo.nav : NaN;
+  const bd = dateSel.value;
 
   const byCat = new Map();
   for(const f of positionsFiles) for(const r of f.rows){
@@ -874,14 +850,12 @@ function renderExposure(){
     rest.gross = rest.long - rest.short;
     cats = [...cats.slice(0, N), rest];
   }
-  const bconv = v => asNav ? (isFinite(navB) && navB ? v/navB : NaN) : v;
-
   if(brkChart) brkChart.destroy();
   brkChart = new Chart(document.getElementById('brkChart'), {
     type:'bar',
     data:{labels:cats.map(o=>o.cat), datasets:[
-      {label:'Long', data:cats.map(o=>bconv(o.long)), backgroundColor:'rgba(79,195,138,0.75)', borderColor:'#4fc38a', borderWidth:1},
-      {label:'Short', data:cats.map(o=>bconv(o.short)), backgroundColor:'rgba(224,102,102,0.75)', borderColor:'#e06666', borderWidth:1},
+      {label:'Long', data:cats.map(o=>o.long), backgroundColor:'rgba(79,195,138,0.75)', borderColor:'#4fc38a', borderWidth:1},
+      {label:'Short', data:cats.map(o=>o.short), backgroundColor:'rgba(224,102,102,0.75)', borderColor:'#e06666', borderWidth:1},
     ]},
     options:{indexAxis:'y', responsive:true, maintainAspectRatio:false, animation:false,
       plugins:{legend:{display:true, labels:{color:DIM, boxWidth:12, font:{size:11}}},
@@ -893,12 +867,11 @@ function renderExposure(){
   document.querySelector('#weekly tbody').innerHTML = win.map(o => {
     const r = o.gross ? o.net/o.gross : NaN;
     return `<tr><td>${o.ymd}</td>`+
-      `<td class="pos">${fmtV(conv(o.long,o.nav))}</td>`+
-      `<td class="neg">${fmtV(conv(o.short,o.nav))}</td>`+
-      `<td>${fmtV(conv(o.gross,o.nav))}</td>`+
-      `<td class="${o.net>=0?'pos':'neg'}">${fmtV(conv(o.net,o.nav))}</td>`+
-      `<td class="${r>=0?'pos':'neg'}">${fmt.pct(r)}</td>`+
-      `<td>${fmt.eurM(o.nav)}</td></tr>`;
+      `<td class="pos">${fmtV(o.long)}</td>`+
+      `<td class="neg">${fmtV(o.short)}</td>`+
+      `<td>${fmtV(o.gross)}</td>`+
+      `<td class="${o.net>=0?'pos':'neg'}">${fmtV(o.net)}</td>`+
+      `<td class="${r>=0?'pos':'neg'}">${fmt.pct(r)}</td></tr>`;
   }).join('');
 }
 
@@ -1121,7 +1094,7 @@ function exportWeeksReal(){
   });
 }
 
-// Exposition hebdo dans la fenêtre : montants EUR natifs + équivalent % du NAV.
+// Exposition hebdo dans la fenêtre : montants EUR natifs (Pure Exposure).
 function exportExposure(){
   const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
   return exposure.filter(o => o.m >= from && o.m <= to).map(o => {
@@ -1338,7 +1311,6 @@ document.getElementById('chips').addEventListener('click', e => {
   const p = e.target.closest('button[data-rmpos]');
   if(p) removePos(Number(p.dataset.rmpos));
 });
-document.getElementById('expunit').addEventListener('change', renderExposure);
 document.getElementById('brkdim').addEventListener('change', renderExposure);
 document.getElementById('brkdate').addEventListener('change', renderExposure);
 document.getElementById('sleeve').addEventListener('change', e => { activeIdx = Number(e.target.value); refresh(true); });
