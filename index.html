@@ -1126,9 +1126,7 @@ function exportExposure(){
   const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
   return exposure.filter(o => o.m >= from && o.m <= to).map(o => {
     const ng = o.gross ? o.net/o.gross : NaN;
-    const navOk = isFinite(o.nav) && o.nav;
-    return [o.ymd, o.long, o.short, o.gross, o.net, isFinite(ng)?ng:null, isFinite(o.nav)?o.nav:null,
-      navOk ? o.gross/o.nav : null, navOk ? o.net/o.nav : null];
+    return [o.ymd, o.long, o.short, o.gross, o.net, isFinite(ng) ? ng : null];
   });
 }
 
@@ -1196,9 +1194,9 @@ async function exportXlsx(){
 
     if(ed.length){
       const wsE = XLSX.utils.aoa_to_sheet([
-        ['Date','Long (€)','Short (€)','Gross (€)','Net (€)','Net/Gross','NAV (€)','Gross (% NAV)','Net (% NAV)'], ...ed]);
-      fmtCols(wsE, {B:'#,##0', C:'#,##0', D:'#,##0', E:'#,##0', F:'0.0%', G:'#,##0', H:'0.0%', I:'0.0%'});
-      wsE['!cols'] = [{wch:11},{wch:15},{wch:15},{wch:15},{wch:15},{wch:10},{wch:15},{wch:13},{wch:13}];
+        ['Date','Long (€)','Short (€)','Gross (€)','Net (€)','Net/Gross'], ...ed]);
+      fmtCols(wsE, {B:'#,##0', C:'#,##0', D:'#,##0', E:'#,##0', F:'0.0%'});
+      wsE['!cols'] = [{wch:11},{wch:15},{wch:15},{wch:15},{wch:15},{wch:10}];
       XLSX.utils.book_append_sheet(wb, wsE, 'Exposure');
     }
 
