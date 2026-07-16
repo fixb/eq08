@@ -1100,7 +1100,7 @@ function exportWeeks(){
 function exportWeeksReal(){
   const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
   const snaps = exposure.filter(o => o.m >= from && o.m <= to);   // déjà trié par date
-  let cum = 0, navIdx = 100, lastEar = null;
+  let cum = 0, lastEar = null;
   return snaps.map((s, i) => {
     const start = s.ymd, end = i+1 < snaps.length ? snaps[i+1].ymd : null;   // end exclusif, null = jusqu'à la fin
     let pnl = 0, days = 0, lastY = start;
@@ -1116,10 +1116,8 @@ function exportWeeksReal(){
     const rEAR = ear ? pnl/ear : null;
     const rG = s.gross ? pnl/s.gross : null;
     const rL = s.long ? pnl/s.long : null;
-    const rN = isFinite(s.nav) && s.nav ? pnl/s.nav : null;
-    if(rN != null) navIdx *= (1 + rN);
-    return [isoWeek(s.ymd), start, lastY, days, pnl, cum, ear, s.gross, s.long, s.short, s.net, s.nav,
-      rEAR, rG, rL, rN, rN != null ? navIdx : null];
+    return [isoWeek(s.ymd), start, lastY, days, pnl, cum, ear, s.gross, s.long, s.short, s.net,
+      rEAR, rG, rL];
   });
 }
 
@@ -1176,11 +1174,11 @@ async function exportXlsx(){
     let wsW;
     if(hasExp){
       wsW = XLSX.utils.aoa_to_sheet([
-        ['Week','From','To','Days','PnL (€)','Cumul PnL (€)','EAR (€)','Gross (€)','Long (€)','Short (€)','Net (€)','NAV (€)','r / EAR','r / Gross','r / Long','r / NAV','NAV idx'],
+        ['Week','From','To','Days','PnL (€)','Cumul PnL (€)','EAR (€)','Gross (€)','Long (€)','Short (€)','Net (€)','r / EAR','r / Gross','r / Long'],
         ...exportWeeksReal()]);
-      fmtCols(wsW, {E:'#,##0', F:'#,##0', G:'#,##0', H:'#,##0', I:'#,##0', J:'#,##0', K:'#,##0', L:'#,##0',
-        M:'0.00%', N:'0.00%', O:'0.00%', P:'0.00%', Q:'0.00'});
-      wsW['!cols'] = [{wch:9},{wch:11},{wch:11},{wch:6},{wch:14},{wch:15},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14},{wch:15},{wch:9},{wch:9},{wch:9},{wch:9},{wch:9}];
+      fmtCols(wsW, {E:'#,##0', F:'#,##0', G:'#,##0', H:'#,##0', I:'#,##0', J:'#,##0', K:'#,##0',
+        L:'0.00%', M:'0.00%', N:'0.00%'});
+      wsW['!cols'] = [{wch:9},{wch:11},{wch:11},{wch:6},{wch:14},{wch:15},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14},{wch:9},{wch:9},{wch:9}];
     } else {
       wsW = XLSX.utils.aoa_to_sheet([
         ['Week','From','To','Days','PnL (€)','Avg EAR (€)','r Gross','r Long','r AUM eq','NAV AUM eq'],
