@@ -983,8 +983,9 @@ function exportRows(){
     .filter(r => { const m = r.ymd.slice(0,7); return m >= from && m <= to && r.ear > 0; })
     .map(r => {
       cum += r.pnl;
-      const gross = r.ear/h, long = gross*(1+lg)/2;
-      return [r.ymd, r.pnl, cum, r.ear, gross, long, long/ag];
+      // Short en négatif : Long + Short = Net, Long − Short = Gross, comme l'onglet Exposure.
+      const gross = r.ear/h, long = gross*(1+lg)/2, short = -gross*(1-lg)/2;
+      return [r.ymd, r.pnl, cum, r.ear, gross, long, short, long/ag];
     });
 }
 
@@ -998,6 +999,44 @@ function exportMonths(){
     const rE = o.pnl/o.avgEar, rG = rE*h, rL = rE*h*2/(1+lg), rA = rL*ag;
     nav *= (1+rA);
     return [o.m, o.days, o.pnl, o.avgEar, rG, rL, rA, nav];
+  });
+}
+
+// Semaine ISO 8601 (lundi→dimanche), libellée AAAA-Www sur l'année ISO (celle du jeudi).
+function isoWeek(ymd){
+  const [Y,M,D] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(Y, M-1, D));
+  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay()+6)%7) + 3);   // jeudi de la semaine
+  const firstThu = new Date(Date.UTC(dt.getUTCFullYear(), 0, 4));
+  firstThu.setUTCDate(firstThu.getUTCDate() - ((firstThu.getUTCDay()+6)%7) + 3);
+  const w = 1 + Math.round((dt - firstThu) / (7*86400000));
+  return dt.getUTCFullYear() + '-W' + String(w).padStart(2,'0');
+}
+
+// Track record agrégé par semaine ISO dans la fenêtre — pendant hebdomadaire de l'onglet Monthly.
+function exportWeeks(){
+  const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
+  const h  = Number(document.getElementById('p_h').value)/100;
+  const lg = Number(document.getElementById('p_l').value)/100;
+  const ag = Number(document.getElementById('p_a').value)/100;
+  const byW = new Map();
+  for(const r of dailyRows){
+    const m = r.ymd.slice(0,7);
+    if(m < from || m > to || !(r.ear > 0)) continue;
+    const wk = isoWeek(r.ymd);
+    let o = byW.get(wk);
+    if(!o){ o = {wk, first:r.ymd, last:r.ymd, days:0, pnl:0, earSum:0}; byW.set(wk, o); }
+    o.days++; o.pnl += r.pnl; o.earSum += r.ear;
+    if(r.ymd < o.first) o.first = r.ymd;
+    if(r.ymd > o.last) o.last = r.ymd;
+  }
+  let nav = 100;
+  return [...byW.values()].sort((a,b)=>a.first.localeCompare(b.first)).map(o => {
+    const avgEar = o.days ? o.earSum/o.days : 0;
+    const rE = avgEar > 0 ? o.pnl/avgEar : 0;
+    const rG = rE*h, rL = rE*h*2/(1+lg), rA = rL*ag;
+    nav *= (1+rA);
+    return [o.wk, o.first, o.last, o.days, o.pnl, avgEar, rG, rL, rA, nav];
   });
 }
 
@@ -1039,10 +1078,16 @@ async function exportXlsx(){
 
     const wb = XLSX.utils.book_new();
     const wsD = XLSX.utils.aoa_to_sheet([
-      ['Date','PnL (€)','Cumul PnL (€)','EAR (€)','Gross (€)','Long exposure (€)','AUM eq (€)'], ...d]);
-    fmtCols(wsD, {B:'#,##0', C:'#,##0', D:'#,##0', E:'#,##0', F:'#,##0', G:'#,##0'});
-    wsD['!cols'] = [{wch:11},{wch:14},{wch:15},{wch:14},{wch:15},{wch:18},{wch:15}];
+      ['Date','PnL (€)','Cumul PnL (€)','EAR (€)','Gross (€)','Long exposure (€)','Short exposure (€)','AUM eq (€)'], ...d]);
+    fmtCols(wsD, {B:'#,##0', C:'#,##0', D:'#,##0', E:'#,##0', F:'#,##0', G:'#,##0', H:'#,##0'});
+    wsD['!cols'] = [{wch:11},{wch:14},{wch:15},{wch:14},{wch:15},{wch:18},{wch:18},{wch:15}];
     XLSX.utils.book_append_sheet(wb, wsD, 'Daily');
+
+    const wsW = XLSX.utils.aoa_to_sheet([
+      ['Week','From','To','Days','PnL (€)','Avg EAR (€)','r Gross','r Long','r AUM eq','NAV AUM eq'], ...exportWeeks()]);
+    fmtCols(wsW, {E:'#,##0', F:'#,##0', G:'0.00%', H:'0.00%', I:'0.00%', J:'0.00'});
+    wsW['!cols'] = [{wch:9},{wch:11},{wch:11},{wch:6},{wch:14},{wch:14},{wch:10},{wch:10},{wch:10},{wch:11}];
+    XLSX.utils.book_append_sheet(wb, wsW, 'Weekly');
 
     const wsM = XLSX.utils.aoa_to_sheet([
       ['Month','Days','PnL (€)','Avg EAR (€)','r Gross','r Long','r AUM eq','NAV AUM eq'], ...exportMonths()]);
