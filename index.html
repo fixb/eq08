@@ -911,9 +911,9 @@ const NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 const NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const NS_XDR = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing';
 const XHEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-// Emprise d'un graphe exporté, en cellules : largeur, hauteur, pas vertical (hauteur + gap).
-// Dimensionnée pour que la pile de graphes tienne sur une page A4 portrait (fitToPage).
-const CH_COLS = 11, CH_ROWS = 11, CH_STEP = 12;
+// Emprise d'un graphe exporté et disposition en grille 2 colonnes (en cellules) :
+// largeur, hauteur, gouttières horizontale/verticale. Feuille Charts en paysage.
+const CH_COLS = 9, CH_ROWS = 14, CH_COLGAP = 1, CH_ROWGAP = 1, CH_NCOL = 2;
 
 function xesc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c])); }
 
@@ -932,7 +932,15 @@ function axisFmt(maxAbs){
 
 // series : [{col, color}] — une ou plusieurs droites partageant les mêmes axes. Le nom de série
 // (légende) est lu dans l'en-tête de colonne ; la légende n'apparaît qu'à partir de deux séries.
-function chartXml(sheet, title, series, nRows, idx, fmt){
+// Arrondi supérieur à un cran « rond » (½ ordre de grandeur) : 215 M€ → 250 M€, pour des
+// bornes d'axe lisibles plutôt qu'un ±215 718 711 brut.
+function niceCeil(x){
+  if(!(x > 0)) return x;
+  const mag = Math.pow(10, Math.floor(Math.log10(x)));
+  return Math.ceil(x / (mag/2)) * (mag/2);
+}
+
+function chartXml(sheet, title, series, nRows, idx, fmt, bounds){
   const idA = 100000001 + idx*2, idB = 100000002 + idx*2;
   const txPr = (sz, c, rot) => `<c:txPr><a:bodyPr${rot ? ` rot="${rot}" vert="horz"` : ''}/><a:lstStyle/>`
     + `<a:p><a:pPr><a:defRPr sz="${sz}" b="0"><a:solidFill><a:srgbClr val="${c}"/></a:solidFill>`
@@ -961,7 +969,7 @@ function chartXml(sheet, title, series, nRows, idx, fmt){
     + `<c:catAx><c:axId val="${idA}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/>`
     + `<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="low"/>`
     + line(9525, XL_AXIS) + txPr(800, XL_TXT, -2700000) + `<c:crossAx val="${idB}"/></c:catAx>`
-    + `<c:valAx><c:axId val="${idB}"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="l"/>`
+    + `<c:valAx><c:axId val="${idB}"/><c:scaling><c:orientation val="minMax"/>${bounds ? `<c:max val="${bounds.max}"/><c:min val="${bounds.min}"/>` : ''}</c:scaling><c:delete val="0"/><c:axPos val="l"/>`
     + `<c:majorGridlines>${line(9525, XL_GRID)}</c:majorGridlines>`
     + `<c:numFmt formatCode="${xesc(fmt)}" sourceLinked="0"/>`
     + `<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>`
@@ -976,8 +984,10 @@ function chartXml(sheet, title, series, nRows, idx, fmt){
 function drawingXml(n){
   let out = XHEAD + `<xdr:wsDr xmlns:xdr="${NS_XDR}" xmlns:a="${NS_A}">`;
   for(let i = 0; i < n; i++){
-    out += `<xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${i*CH_STEP}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>`
-      + `<xdr:to><xdr:col>${CH_COLS}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${i*CH_STEP+CH_ROWS}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>`
+    const c0 = (i % CH_NCOL) * (CH_COLS + CH_COLGAP);            // grille : colonne 0 / 1
+    const r0 = Math.floor(i / CH_NCOL) * (CH_ROWS + CH_ROWGAP);  // ligne de la grille
+    out += `<xdr:twoCellAnchor><xdr:from><xdr:col>${c0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${r0}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>`
+      + `<xdr:to><xdr:col>${c0+CH_COLS}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${r0+CH_ROWS}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>`
       + `<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="${i+2}" name="Chart ${i+1}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>`
       + `<xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>`
       + `<a:graphic><a:graphicData uri="${NS_C}"><c:chart xmlns:c="${NS_C}" xmlns:r="${NS_R}" r:id="rId${i+1}"/></a:graphicData></a:graphic>`
@@ -1225,7 +1235,7 @@ async function exportXlsx(){
       chartCfg = [
         {sheet:'Daily',  title:'Cumul PnL (€)', nRows, rows:d, series:[{col:'C', di:2, color:'2E9E6B'}]},
         {sheet:'Weekly', title:'EAR (€)', nRows:nRowsW, rows:wr, series:[{col:'G', di:6, color:'D98324'}]},
-        {sheet:'Weekly', title:'Long / Short exposure (€)', nRows:nRowsW, rows:wr,
+        {sheet:'Weekly', title:'Long / Short exposure (€)', nRows:nRowsW, rows:wr, sym:true,
           series:[{col:'I', di:8, color:'3B6FD4'}, {col:'J', di:9, color:'C0552E'}]},
         {sheet:'Weekly', title:'Gross exposure (€)', nRows:nRowsW, rows:wr, series:[{col:'H', di:7, color:'2F6FB0'}]},
         {sheet:'Weekly', title:'Net exposure (€)',   nRows:nRowsW, rows:wr, series:[{col:'K', di:10, color:'C0552E'}]},
@@ -1239,7 +1249,8 @@ async function exportXlsx(){
     }
     chartCfg.forEach((c, i) => {
       const maxAbs = c.rows.reduce((a,r) => Math.max(a, ...c.series.map(s => Math.abs(Number(r[s.di])||0))), 0);
-      zip.file(`xl/charts/chart${i+1}.xml`, chartXml(c.sheet, c.title, c.series, c.nRows, i, axisFmt(maxAbs)));
+      const bounds = c.sym ? {min: -niceCeil(maxAbs), max: niceCeil(maxAbs)} : null;   // axe centré sur 0
+      zip.file(`xl/charts/chart${i+1}.xml`, chartXml(c.sheet, c.title, c.series, c.nRows, i, axisFmt(maxAbs), bounds));
     });
     zip.file('xl/drawings/drawing1.xml', drawingXml(chartCfg.length));
     zip.file('xl/drawings/_rels/drawing1.xml.rels', XHEAD
@@ -1252,8 +1263,10 @@ async function exportXlsx(){
 
     // Zone d'impression = emprise de la pile de graphes ; couplée à fitToPage portrait, elle
     // ramène toute la feuille Charts sur une seule page.
-    const lastRow = (chartCfg.length - 1) * CH_STEP + CH_ROWS;
-    const printRef = `Charts!$A$1:$${XLSX.utils.encode_col(CH_COLS)}$${lastRow + 1}`;
+    const gridRows = Math.ceil(chartCfg.length / CH_NCOL);
+    const lastRow = (gridRows - 1) * (CH_ROWS + CH_ROWGAP) + CH_ROWS;
+    const rightCols = (chartCfg.length >= 2 ? CH_COLS + CH_COLGAP + CH_COLS : CH_COLS);
+    const printRef = `Charts!$A$1:$${XLSX.utils.encode_col(rightCols)}$${lastRow + 1}`;
     const dn = `<definedName name="_xlnm.Print_Area" localSheetId="${chartsIdx}">${printRef}</definedName>`;
     const wbOut = /<definedNames>/.test(wbXmlStr)
       ? wbXmlStr.replace('<definedNames>', '<definedNames>' + dn)
@@ -1270,7 +1283,7 @@ async function exportXlsx(){
     // ignoredErrors(28) et drawing(30). Les poser en fin de séquence les placerait après le
     // <ignoredErrors> que SheetJS ajoute sur la feuille Charts → Excel rejette et retire les graphes.
     const pageBlock = '<pageMargins left="0.4" right="0.4" top="0.4" bottom="0.4" header="0.2" footer="0.2"/>'
-      + '<pageSetup orientation="portrait" fitToWidth="1" fitToHeight="1"/>';
+      + '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/>';   // 1 page de large, hauteur libre
     sx = /<ignoredErrors/.test(sx)
       ? sx.replace('<ignoredErrors', pageBlock + '<ignoredErrors')
       : sx.replace('</worksheet>', pageBlock + '</worksheet>');
