@@ -1070,7 +1070,7 @@ function exportWeeks(){
 function exportWeeksReal(){
   const from = document.getElementById('w_from').value, to = document.getElementById('w_to').value;
   const snaps = exposure.filter(o => o.m >= from && o.m <= to);   // déjà trié par date
-  let cum = 0, navIdx = 100;
+  let cum = 0, navIdx = 100, lastEar = null;
   return snaps.map((s, i) => {
     const start = s.ymd, end = i+1 < snaps.length ? snaps[i+1].ymd : null;   // end exclusif, null = jusqu'à la fin
     let pnl = 0, days = 0, lastY = start;
@@ -1079,12 +1079,16 @@ function exportWeeksReal(){
       pnl += r.pnl; days++; if(r.ymd > lastY) lastY = r.ymd;
     }
     cum += pnl;
-    const rEAR = s.ear ? pnl/s.ear : null;
+    // « Equity at Risk » est vide sur quelques dates → EAR = 0. On reporte la dernière EAR connue
+    // (forward-fill) pour ne pas afficher un creux à 0 dans le graphe ni casser r/EAR.
+    const ear = (isFinite(s.ear) && s.ear > 0) ? s.ear : lastEar;
+    if(isFinite(ear) && ear > 0) lastEar = ear;
+    const rEAR = ear ? pnl/ear : null;
     const rG = s.gross ? pnl/s.gross : null;
     const rL = s.long ? pnl/s.long : null;
     const rN = isFinite(s.nav) && s.nav ? pnl/s.nav : null;
     if(rN != null) navIdx *= (1 + rN);
-    return [isoWeek(s.ymd), start, lastY, days, pnl, cum, s.ear, s.gross, s.long, s.short, s.net, s.nav,
+    return [isoWeek(s.ymd), start, lastY, days, pnl, cum, ear, s.gross, s.long, s.short, s.net, s.nav,
       rEAR, rG, rL, rN, rN != null ? navIdx : null];
   });
 }
