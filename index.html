@@ -559,22 +559,34 @@ function renderCommentary(from, to, st, totPnl, n){
     const dir = b>0.10 ? 'nettement net long' : b>0.02 ? 'légèrement net long'
       : b<-0.10 ? 'nettement net short' : b<-0.02 ? 'légèrement net short'
       : 'quasi neutre (long ≈ short)';
-    const parts = [`Au dernier snapshot <b>${last.ymd}</b> : gross <b>${fmt.eurM(last.gross)}</b> (long ${fmt.eurM(last.long)} / short ${fmt.eurM(Math.abs(last.short))}), net ${fmt.eurM(last.net)} = ${fmt.pct(b)} du gross → <b>${dir}</b>.`];
-    const names = new Map();
+    const parts = [`Au dernier snapshot <b>${last.ymd}</b> : gross ${fmt.eurM(last.gross)} (long ${fmt.eurM(last.long)} / short ${fmt.eurM(Math.abs(last.short))}), net ${fmt.eurM(last.net)} = ${fmt.pct(b)} du gross → <b>${dir}</b>.`];
+    // Allocation du risque : part d'Equity at Risk par stratégie (Portefeuille) et par nom.
+    const byStrat = new Map(), byName = new Map();
+    let totE = 0;
     for(const f of positionsFiles) for(const r of f.rows){
       if(r.ymd !== last.ymd) continue;
+      const e = r.eqr;
+      if(!(e > 0)) continue;   // EAR = part de risque ≥ 0 ; on ignore les lignes sans risque
+      totE += e;
+      const strat = (r.portfolio || '').trim() || '(n.d.)';
+      byStrat.set(strat, (byStrat.get(strat) || 0) + e);
       const nm = (r.underlying || '').trim() || '(n.d.)';
-      names.set(nm, (names.get(nm) || 0) + Math.abs(r.pure));
+      byName.set(nm, (byName.get(nm) || 0) + e);
     }
-    const grossAbs = [...names.values()].reduce((a,v)=>a+v,0);
-    const top = [...names.entries()].sort((a,b)=>b[1]-a[1]).slice(0,3);
-    if(top.length && grossAbs > 0){
-      const ts = top.map(([nm,v]) => `${esc(nm)} (${fmt.pct(v/grossAbs)})`).join(', ');
-      parts.push(`${names.size} sous-jacents ; principales concentrations brutes : ${ts}.`);
+    if(totE > 0){
+      const strat = [...byStrat.entries()].sort((a,b)=>b[1]-a[1])
+        .map(([k,v]) => `${esc(k)} ${fmt.pct(v/totE)}`).join(' · ');
+      const ear = isFinite(last.ear) ? ' ≈ ' + fmt.eurM(last.ear) : '';
+      parts.push(`Allocation du risque (EAR${ear}) par stratégie : <b>${strat}</b>.`);
+      const top = [...byName.entries()].sort((a,b)=>b[1]-a[1]).slice(0,3)
+        .map(([nm,v]) => `${esc(nm)} (${fmt.pct(v/totE)})`).join(', ');
+      parts.push(`${byName.size} sous-jacents · top risque : ${top}.`);
+    } else {
+      parts.push(`<span class="cmt-muted">Colonne Equity at Risk absente de l'export Positions — composition non ventilée en risque.</span>`);
     }
     comp = `<p>${parts.join(' ')}</p>`;
   } else {
-    comp = `<p class="cmt-muted">Charge un export Positions (colonne Pure Exposure) pour le commentaire de composition.</p>`;
+    comp = `<p class="cmt-muted">Charge un export Positions (colonnes Pure Exposure + Equity at Risk) pour le commentaire de composition.</p>`;
   }
 
   el.innerHTML =
