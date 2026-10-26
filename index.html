@@ -1052,6 +1052,29 @@ function exportMonths(){
   });
 }
 
+// Perf annualisée, vol annualisée et Sharpe glissants sur les rendements AUM eq mensuels
+// (colonne rA de exportMonths). Fenêtre glissante de 12 mois, émise dès 6 mois disponibles
+// (expanding avant d'atteindre 12). Même logique que stats(). Avant 6 mois : cellules vides,
+// tracées en trous dans le graphe. Suit la fenêtre From/To comme le reste de l'export.
+function exportRolling(){
+  const rf = Number(document.getElementById('p_rf').value)/100;
+  const WIN = 12, MINN = 6, mar = rf/12;
+  const m = exportMonths();                      // [month, days, pnl, avgEar, rG, rL, rA, nav]
+  const rs = m.map(r => r[6]);                   // rendement AUM eq mensuel
+  return m.map((r, i) => {
+    const w = rs.slice(Math.max(0, i-WIN+1), i+1);
+    const k = w.length;
+    if(k < MINN) return [r[0], null, null, null];
+    const mean = w.reduce((a,b)=>a+b,0)/k;
+    const cum = w.reduce((a,b)=>a*(1+b),1) - 1;
+    const ann = Math.pow(1+cum, 12/k) - 1;
+    const vol = k > 1 ? Math.sqrt(w.reduce((a,b)=>a+(b-mean)**2,0)/(k-1)) : NaN;
+    const vola = vol*Math.sqrt(12);
+    const sharpe = vol > 0 ? (mean-mar)/vol*Math.sqrt(12) : NaN;
+    return [r[0], ann, isFinite(vola)?vola:null, isFinite(sharpe)?sharpe:null];
+  });
+}
+
 // Semaine ISO 8601 (lundi→dimanche), libellée AAAA-Www sur l'année ISO (celle du jeudi).
 function isoWeek(ymd){
   const [Y,M,D] = ymd.split('-').map(Number);
@@ -1199,6 +1222,18 @@ async function exportXlsx(){
     wsM['!cols'] = [{wch:9},{wch:6},{wch:14},{wch:14},{wch:10},{wch:10},{wch:10},{wch:11}];
     XLSX.utils.book_append_sheet(wb, wsM, 'Monthly');
 
+    // Rolling 12m (perf annualisée, vol, Sharpe) — base des 3 graphes de risque/rendement.
+    const roll = exportRolling();
+    const hasRoll = roll.some(r => r[1] != null);
+    const nRowsR = roll.length + 1;
+    if(hasRoll){
+      const wsR = XLSX.utils.aoa_to_sheet([
+        ['Month','Perf. annualisée (12m gliss.)','Vol. annualisée (12m gliss.)','Sharpe (12m gliss.)'], ...roll]);
+      fmtCols(wsR, {B:'0.0%', C:'0.0%', D:'0.00'});
+      wsR['!cols'] = [{wch:9},{wch:26},{wch:26},{wch:20}];
+      XLSX.utils.book_append_sheet(wb, wsR, 'Rolling');
+    }
+
     if(ed.length){
       const wsE = XLSX.utils.aoa_to_sheet([
         ['Date','Long (€)','Short (€)','Gross (€)','Net (€)','Net/Gross'], ...ed]);
@@ -1263,10 +1298,15 @@ async function exportXlsx(){
         {sheet:'Daily', title:'Long exposure (€)', nRows, rows:d, series:[{col:'F', di:5, color:'3B6FD4'}]},
       ];
     }
+    if(hasRoll) chartCfg.push(
+      {sheet:'Rolling', title:'Perf. annualisée glissante (12m)', nRows:nRowsR, rows:roll, fmt:'0.0%', series:[{col:'B', di:1, color:'2E9E6B'}]},
+      {sheet:'Rolling', title:'Volatilité annualisée glissante (12m)', nRows:nRowsR, rows:roll, fmt:'0.0%', series:[{col:'C', di:2, color:'D98324'}]},
+      {sheet:'Rolling', title:'Sharpe glissant (12m)', nRows:nRowsR, rows:roll, fmt:'0.00', series:[{col:'D', di:3, color:'3B6FD4'}]},
+    );
     chartCfg.forEach((c, i) => {
       const maxAbs = c.rows.reduce((a,r) => Math.max(a, ...c.series.map(s => Math.abs(Number(r[s.di])||0))), 0);
       const bounds = c.sym ? {min: -niceCeil(maxAbs), max: niceCeil(maxAbs)} : null;   // axe centré sur 0
-      zip.file(`xl/charts/chart${i+1}.xml`, chartXml(c.sheet, c.title, c.series, c.nRows, i, axisFmt(maxAbs), bounds));
+      zip.file(`xl/charts/chart${i+1}.xml`, chartXml(c.sheet, c.title, c.series, c.nRows, i, c.fmt || axisFmt(maxAbs), bounds));
     });
     const anchors = chartAnchors(chartCfg);
     zip.file('xl/drawings/drawing1.xml', drawingXml(anchors));
